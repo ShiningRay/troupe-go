@@ -65,3 +65,39 @@
   （单连接池 `SetMaxOpenConns(1)` 下外部查询会互相等锁——首轮验证发现并修复）；
   `Invoke` 仅适用于 live 调度（Manual 模式下 Call 后立即 Await 会阻塞，
   Rehearsal 用法为 Pump 后经 Future.Await——已写入测试注释与文档）。
+
+## M3：共享状态与生产容错（2026-11-17，A/B/C/D 四次迭代提交）
+
+- 环境：go1.26.0 windows/amd64；PostgreSQL 15（本机 docker postgres:15-alpine +
+  CI postgres service）；pgx/v5 v5.13.0；modernc.org/sqlite v1.62.0。
+- 命令：`TROUPE_PG_URL=... go test -race -count=1 ./troupepg/`、
+  `go test -race -count=1 ./...`、`go test -count=1 -v . ./transport/`。
+- 结果：**根包 66 + transport 11 + PG 7 = 84 用例 `-race` 全绿**。验收对照（PLAN M3）：
+
+| 验收项 | 证据 |
+|---|---|
+| ≥3 独立进程连真实 PG + kill -9 恢复 | `TestPGMultiProcessRecovery`（两独立子进程 os.Exit(1) 硬退出≈kill -9，父进程接管后状态 2 续到 3） |
+| 端到端接管反例 | `TestPGStageTakeover`（双 Stage 实例：接管→旧实例 save fencing 拒绝失效 save_failures=1→重激活从已提交快照继续 1→2→3）+ `TestPGLeaseTakeoverFencing`（租期内跨实例 acquire 拒绝、过期接管 epoch 单调+1、旧 epoch 写拒绝） |
+| acquire 租期守卫/单语句 | `TestPGCreateWriteCAS` + store.go acquire upsert WHERE 租期守卫 RETURNING epoch |
+| journal 同事务 | `TestPGJournalAtomicCommit`（CAS 失败 journal 回滚、过期过滤） |
+| TCP 帧协议 | `TestFrameRoundTrip` + `TestFrameAgainstGoldenEnvelope`（golden/envelope.json sample_request 帧锚点）+ `TestFrameProtocolViolations`（CRC 损坏/magic/超限读前拒绝） |
+| 认证轮换 | `TestAuthenticatorRotation`（rotate 宽限/revoke 立即失效/常量时间比较）+ `TestAuthOverWire`（未认证断连/错误 token/轮换宽限 e2e/撤销后失效） |
+| 错误过线分类 | `TestErrorClassificationOverWire`（whitelist/unknown role/invalid argument 分类保持）；ec 用 troupe-errors/1 稳定码（对齐 ADR 提案；troupe.cr 实现为 Crystal 类名——差异记录，跨语言对齐以 golden/errors.json 为准） |
+| deadline/cancel/断连 | `TestDeadlineExecutingUnknownOutcomeOverWire`（executing 未知、迟到结果不放行、效果照常提交）+ `TestCancelEnvelopePropagation`（cancel 信封→Turn 检查点提前收束）+ `TestDisconnectUnknownOutcome`（断连 UnknownOutcome、服务端效果照常提交） |
+| 连接级 in-flight | `TestInflightCap`（拒绝经 rep 送达 future：backpressure retryable） |
+| Roster incarnation | `TestRosterIncarnationNegotiation`（活成员重入团拒绝、死亡重入团+1、心跳守卫）+ `TestRosterMarkDeadIncarnationGuard` |
+| HashRing 相邻区间 | `TestHashRingGoldenCRCAndMovement`（1000 键快照：移除只动该节点键、重加入归属恢复） |
+| Router 键漂移 | `TestRouterDriftOnDeath`（死亡节点键漂移后继、其他键不动、复活恢复） |
+| 优雅 drain 三段式 | `TestGracefulDrain`（拒新 draining retryable→未排空 finish 拒绝→排空后停机；Manual 模式确定性） |
+| Reminder claim fencing + 归属过滤 | `TestReminderClaimFencingAndLeaseTakeover`（租期内他实例不可认领/接管认领 version+1/stale complete 拒绝）+ `TestPGReminderOwnershipFilterAndFencing`（归属过滤：他实例不认领非本节点 actor；claim 租期 fencing 语义澄清——所有权转移阻止新认领不撤销在途认领） |
+| Reminder 至少一次 | `TestReminderDeliversTurnAndCompletes` + `TestReminderFailureRedeliversAtLeastOnce`（失败 release→重投成功、fn 尝试=2） |
+| Outbox 同事务+至少一次 | `TestOutboxAtomicCommitAndDispatch`（emit+save 同事务、handler 失败重投、MarkSent 后停止）+ `TestPGOutboxCommitAndDispatch`（CAS 失败 outbox 回滚）+ `TestOutboxSurvivesReactivation`（失效重激活事件不丢）+ `TestEmitEventWithoutOutboxStoreFailsFast`（不支持 store 立即报错不静默丢失） |
+
+- 实现注记：
+  - reminder fencing 是 **claim 租期**（status_version+holder+claim 租期，DB 时钟）——
+    所有权转移只经归属过滤阻止新认领，不撤销在途认领（交付中效果保持，至少一次语义）。
+  - PG claim SQL 占位符需显式类型标注（`$1::text`/`$2::float8`）——pgx 42P18
+    （could not determine data type）实测坑位。
+  - PG 测试 openPair 以 TRUNCATE 清共享库残留（容器跨 go test 持久）。
+  - ec 稳定码 vs troupe.cr 类名差异：以 ADR 0001 提案（troupe-errors/1 码表）为准，
+    待 troupe-planning 采纳后全语言统一。

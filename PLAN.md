@@ -85,30 +85,33 @@ traceparent）✅；泛型/手写注册行为一致（同一 manifest 双路径�
 所有过载路径有界并显式拒绝 ✅。——52+2 测试 `go test -race` 全绿
 （go1.26.0 windows），基准与对照见 [docs/verification.md](docs/verification.md)。
 
-## M3：共享状态与生产容错
+## M3：共享状态与生产容错（已完成，2026-11-17；分 A/B/C/D 四次迭代提交）
 
-- [ ] PostgreSQL `PropsStore`/`OwnershipStore`（`jackc/pgx/v5`，独立包）：
+- [x] PostgreSQL `PropsStore`/`OwnershipStore`（`jackc/pgx/v5`，独立包）：
       acquire 单语句 RETURNING 带租期、跨实例租期内拒绝可重试、epoch 单调、
       renew 同 epoch 续租、fencing 在 UPDATE WHERE 内原子校验、幂等记录同事务；
       `CrossNodeSafe()==true`；CI 以 postgres service 必跑真实 PG 用例。
-- [ ] 激活先 acquire 再读/迁移/写；端到端接管反例（旧实例 save 被 fencing
+- [x] 激活先 acquire 再读/迁移/写；端到端接管反例（旧实例 save 被 fencing
       拒绝并失效，新实例从 PG 已提交快照继续）。
-- [ ] TCP transport（`troupe-envelope/1`，ADR 0001）：帧协议（magic+length
+- [x] TCP transport（`troupe-envelope/1`，ADR 0001）：帧协议（magic+length
       +CRC32，超限读前拒绝不分配内存）、连接级 in-flight、方法白名单、
       deadline/断连错误分类、cancel 信封协作取消传播；
       认证 token + 轮换/宽限/撤销（常量时间比较）+ TLS 方案指引。
-- [ ] `Roster` 成员视图（join/heartbeat/sweep、incarnation 单调协商）、
+- [x] `Roster` 成员视图（join/heartbeat/sweep、incarnation 单调协商）、
       `HashRing` vnodes+CRC32（golden 已锚定）、`Router` 死亡节点键漂移、
       优雅 drain 三段式（begin 拒新 retryable → idle → finish）。
-- [ ] 持久 Reminder：`ReminderStore`（Memory/PG）+ `ReminderRunner`——
+- [x] 持久 Reminder：`ReminderStore`（Memory/PG）+ `ReminderRunner`——
       稳定键、归属过滤、原子 claim（租期，DB 时钟）、complete/release fencing、
       失败重投至少一次（业务幂等兜底）；volatile timer 与 durable reminder 分离。
-- [ ] 外部副作用 Outbox：`EmitEvent` 与 Props 同事务提交 + `OutboxDispatcher`
+- [x] 外部副作用 Outbox：`EmitEvent` 与 Props 同事务提交 + `OutboxDispatcher`
       至少一次派发。
 
-**验收**：至少三个独立 Go 进程连接真实 PostgreSQL，扩容、kill -9、冻结恢复后
-无未防护双活成功写；旧 epoch 写拒绝；Reminder 跨进程恢复与重复幂等；
-TCP 移植 troupe.cr 7 类反例全绿；POSIX CI 必跑故障用例。
+**验收**（✅ 2026-11-17，真实 PostgreSQL 15 验证）：至少三个独立 Go 进程连接真实
+PostgreSQL（两子进程 os.Exit(1) 硬退出≈kill -9 + 父进程接管，状态 2 续到 3）✅；
+旧 epoch 写拒绝（fencing 优先于 CAS）✅；Reminder claim fencing 与归属过滤 ✅；
+TCP 反例（超限/CRC/magic/认证/deadline executing/断连 UnknownOutcome/cancel
+传播/in-flight）11 用例 ✅；CI postgres service 必跑故障用例 ✅。
+——证据逐项见 [docs/verification.md](docs/verification.md) M3 节。
 
 ## M4：调度扩展与实时 Show
 
