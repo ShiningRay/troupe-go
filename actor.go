@@ -1,0 +1,105 @@
+package troupe
+
+import (
+	"encoding/json"
+	"sync/atomic"
+	"time"
+)
+
+// ActivationContext 一次激活的所有权与存储视图。Revision 由 Save 原子推进。
+// （幂等记录与 Outbox journal 在 M2/M3 扩展，对齐 troupe.cr 同路径。）
+type ActivationContext struct {
+	store         PropStore
+	schemaVersion int
+	Epoch         uint64
+	Revision      uint64
+	clock         Clock
+}
+
+func (c *ActivationContext) Now() time.Time { return c.clock.Now() }
+
+// Props 是可恢复状态的契约标记：必须是纯数据 DTO（encoding/json 可往返），
+// 禁止 func/chan/goroutine/互斥锁等运行时对象进入 Props（DESIGN §6）。
+// 序列化边界由框架强制：激活从 store.Data JSON 反序列化重建实例，
+// Save 序列化后 CAS 提交——调用方与 Actor 永不共享可变结构。
+type Props = any
+
+// Actor 类型化 Actor 基类：用户角色以指针嵌入
+//
+//	type CartActor struct { *troupe.Actor[CartProps] }
+//
+// 并在 manifest 工厂中构造。具体 Actor 可实现 StageHooks 获得 on/off 生命周期。
+type Actor[P any] struct {
+	id    ActorID
+	props P
+	actx  *ActivationContext
+}
+
+func NewActor[P any](id ActorID, props P, ctx *ActivationContext) *Actor[P] {
+	return &Actor[P]{id: id, props: props, actx: ctx}
+}
+
+// ID 返回本 Actor 的 canonical 标识。
+func (a *Actor[P]) ID() ActorID { return a.id }
+
+// Props 返回本激活工作状态的指针（仅本 Actor 的串行 Turn 可见/可改；
+// Crystal 引用语义的 Go 等价物——跨 Turn 持有指针无效化后即失效）。
+func (a *Actor[P]) Props() *P { return &a.props }
+
+// SchemaVersion 返回 manifest 目标 schema 版本。
+func (a *Actor[P]) SchemaVersion() int { return a.actx.schemaVersion }
+
+// Save 显式持久化：以 expectedRevision + epoch 原子 CAS 提交当前 Props。
+// 失败（CAS 冲突 / fencing 拒绝）会使实例失效：后续调用从最后已提交快照重新激活。
+func (a *Actor[P]) Save() error {
+	data, err := json.Marshal(a.props)
+	if err != nil {
+		return &InvalidActorStateError{Detail: "props 序列化失败：" + err.Error()}
+	}
+	rec, err := a.actx.store.Write(a.id, a.actx.Revision, a.actx.schemaVersion, string(data), a.actx.Epoch)
+	if err != nil {
+		return err
+	}
+	a.actx.Revision = rec.Revision
+	return nil
+}
+
+// OnStage / OffStage 默认空实现；具体 Actor 通过实现 StageHooks 覆盖。
+// （Go 嵌入不发生虚分派，框架以类型断言在具体类型上发现钩子，见 manifest.buildActor。）
+func (a *Actor[P]) OnStage() error  { return nil }
+func (a *Actor[P]) OffStage() error { return nil }
+
+func (a *Actor[P]) actorID() ActorID { return a.id }
+
+// CancelSignal 协作取消信号（DESIGN §5 时间与取消）：仅置位标志，Turn 是否/何时
+// 响应由 Actor 代码决定。框架不会强行终止 Turn；取消不改变副作用语义
+// （settle 后正常回复）。
+type CancelSignal struct {
+	v atomic.Bool
+}
+
+func newCancelSignal() *CancelSignal { return &CancelSignal{} }
+
+func (c *CancelSignal) Request()        { c.v.Store(true) }
+func (c *CancelSignal) Requested() bool { return c.v.Load() }
+
+// CallContext 单个 Turn 的调用上下文。Clock 可注入：Rehearsal 中 Turn 体内推进
+// 虚拟时钟可确定性模拟耗时。Cancel 为协作取消信号（CallFuture#Cancel 置位，
+// Turn 经 CancelRequested 观察并自行决定是否/如何收束）。Traceparent 在 M2 接入
+// W3C 派生；M1 恒为空。
+type CallContext struct {
+	CallID      uint64
+	ActorID     ActorID
+	Method      string
+	Deadline    time.Time
+	clock       Clock
+	cancel      *CancelSignal
+	Traceparent string
+}
+
+func (c *CallContext) Now() time.Time { return c.clock.Now() }
+
+// CancelRequested 返回调用方是否已请求协作取消。
+func (c *CallContext) CancelRequested() bool { return c.cancel.Requested() }
+
+func (c *CallContext) cancelSignal() *CancelSignal { return c.cancel }

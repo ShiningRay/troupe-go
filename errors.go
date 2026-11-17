@@ -26,21 +26,38 @@ type WireError interface {
 	WireCode() string
 }
 
-// ConflictError 表示 CAS 冲突：Kind 为 "exists"（创建时已存在）或 "revision"（快照过期）。
+// ConflictError 表示 CAS 冲突：Kind 为 ConflictExists（创建时已存在）或
+// ConflictRevision（快照过期）。
 type ConflictError struct {
-	Kind string // "exists" | "revision"
+	Kind  string // "exists" | "revision"
+	Actor string // 可选：canonical ActorID 上下文
 }
 
-func (e *ConflictError) Error() string    { return "conflict: " + e.Kind }
+func (e *ConflictError) Error() string {
+	msg := "conflict: " + e.Kind
+	if e.Actor != "" {
+		msg += "（actor " + e.Actor + "）"
+	}
+	return msg
+}
+
 func (e *ConflictError) WireCode() string { return CodeConflict }
 
-// CallTimeoutError 表示调用期限到期：Phase 为 "queued"（排队中过期，零副作用）
-// 或 "executing"（执行中过期，结果未知）。
+// CallTimeoutError 表示调用期限到期：Phase 为 PhaseQueued（排队中过期，零副作用）
+// 或 PhaseExecuting（执行中过期/迟到 settle，结果未知）。
 type CallTimeoutError struct {
-	Phase string // "queued" | "executing"
+	Phase  string // "queued" | "executing"
+	Method string // 可选上下文
 }
 
-func (e *CallTimeoutError) Error() string    { return "call timeout: " + e.Phase }
+func (e *CallTimeoutError) Error() string {
+	msg := "call timeout: " + e.Phase
+	if e.Method != "" {
+		msg += "（" + e.Method + "）"
+	}
+	return msg
+}
+
 func (e *CallTimeoutError) WireCode() string { return CodeCallTimeout }
 
 // CallRejectedError 表示入队/执行前显式拒绝；Reason 分类见 golden/errors.json，
@@ -48,16 +65,26 @@ func (e *CallTimeoutError) WireCode() string { return CodeCallTimeout }
 type CallRejectedError struct {
 	Reason    string // backpressure|whitelist|shutdown|draining|ownership|invalidated
 	Retryable bool
+	Actor     string // 可选上下文
+	Detail    string // 可选上下文
 }
 
-func (e *CallRejectedError) Error() string    { return "call rejected: " + e.Reason }
+func (e *CallRejectedError) Error() string {
+	msg := "call rejected: " + e.Reason
+	if e.Detail != "" {
+		msg += "：" + e.Detail
+	}
+	if e.Actor != "" {
+		msg += "（actor " + e.Actor + "）"
+	}
+	return msg
+}
+
 func (e *CallRejectedError) WireCode() string { return CodeCallRejected }
 
-// UnknownOutcomeError 表示结果未知（超时/断连后原 Turn 可能仍在执行并提交效果）；
-// 重试必须依赖业务幂等。
-type UnknownOutcomeError struct {
-	Detail string
-}
+// UnknownOutcomeError 表示结果未知（超时/断连/调用方放弃等待后原 Turn 可能仍在
+// 执行并提交效果）；重试必须依赖业务幂等。
+type UnknownOutcomeError struct{ Detail string }
 
 func (e *UnknownOutcomeError) Error() string    { return "unknown outcome: " + e.Detail }
 func (e *UnknownOutcomeError) WireCode() string { return CodeUnknownOutcome }
@@ -81,12 +108,19 @@ func (e *InvalidArgumentError) Error() string    { return "invalid argument: " +
 func (e *InvalidArgumentError) WireCode() string { return CodeInvalidArgument }
 
 // ActivationError 表示激活失败（存储读、迁移或所有权获取失败）。
-type ActivationError struct{ Detail string }
+type ActivationError struct {
+	Detail string
+	Cause  error // 可选：原始错误
+}
 
-func (e *ActivationError) Error() string    { return "activation: " + e.Detail }
+func (e *ActivationError) Error() string { return "activation: " + e.Detail }
+
+func (e *ActivationError) Unwrap() error { return e.Cause }
+
 func (e *ActivationError) WireCode() string { return CodeActivation }
 
-// InvalidActorStateError 表示生命周期/状态约束被违反（如 read_only Turn 调用 Save）。
+// InvalidActorStateError 表示生命周期/状态约束被违反（如 read_only Turn 调用 Save、
+// Turn 执行中重入 pump）。
 type InvalidActorStateError struct{ Detail string }
 
 func (e *InvalidActorStateError) Error() string    { return "invalid actor state: " + e.Detail }
@@ -120,9 +154,9 @@ func (e *InvalidActorIDError) Error() string { return "invalid actor id: " + e.D
 // 码表集合与 golden/errors.json 一致（无多码、无缺码）。
 func wireErrorSamples() map[string]WireError {
 	return map[string]WireError{
-		CodeConflict:            &ConflictError{Kind: "revision"},
-		CodeCallTimeout:         &CallTimeoutError{Phase: "executing"},
-		CodeCallRejected:        &CallRejectedError{Reason: "backpressure", Retryable: true},
+		CodeConflict:            &ConflictError{Kind: ConflictRevision},
+		CodeCallTimeout:         &CallTimeoutError{Phase: PhaseExecuting},
+		CodeCallRejected:        &CallRejectedError{Reason: RejectBackpressure, Retryable: true},
 		CodeUnknownOutcome:      &UnknownOutcomeError{Detail: "deadline"},
 		CodeIdempotencyConflict: &IdempotencyConflictError{Detail: "fingerprint"},
 		CodeUnknownRole:         &UnknownRoleError{Role: "cart"},

@@ -20,27 +20,37 @@
 **门禁**：干净 checkout 可执行 fmt/vet/test；CI 名称不把脚手架测试描述为
 Actor 验收。（✅ 本地 go1.26 windows 验证 `ok github.com/ShiningRay/troupego`）
 
-## M1：语义契约与最小单机核心
+## M1：语义契约与最小单机核心（已完成，2026-11-17）
 
-- [ ] `Role` manifest / `Registry`：显式注册、方法白名单、拒绝生命周期方法 RPC；
-      `Actor[P Props]` 泛型基类与 `save`（revision CAS + epoch fencing 显式提交）。
-- [ ] Memory `PropStore`：原子 create/write CAS、read 独立快照（受控深拷贝
-      + JSON round-trip 边界验证）、revision/schemaVersion。
-- [ ] `Stage`/`Agent`：显式注册、位置透明本地调用、deadline、错误分类透出。
-- [ ] `ActorSlot`：single-flight（并发首调只激活一次）、OnStage/OffStage、
-      Intermission 空闲钝化、保存失败失效/重激活。
-- [ ] CallBoard：有界 channel + 单消费者 goroutine，严格串行 FIFO、排队过期
-      （零副作用）、执行占用（超时不放行旧 Turn）、queue depth/bytes、
-      Stage activation 上限。
-- [ ] `Rehearsal` 测试运行时：固定 namespace、Memory Provider、可注入虚拟时钟、
-      显式 pump 确定性调度。
-- [ ] goroutine 生命周期断言：Stage 关闭后消费者/钝化计时器 goroutine 退出
-      （计数断言，`-race` 必跑）。
+- [x] `Role` manifest / 显式注册：方法白名单、拒绝生命周期方法 RPC（保留名
+      on_stage/off_stage/save/props/actor_id 不可注册不可 RPC）；
+      `Actor[P]` 泛型基类（指针嵌入）与 `Save`（revision CAS + epoch fencing
+      显式提交）；StageHooks 生命周期钩子经类型断言发现。
+- [x] Memory `PropStore`：原子 create/write CAS、read 独立快照（JSON 序列化
+      边界）、revision/schemaVersion、fencing 优先于 CAS（旧 epoch 一律拒绝）；
+      `CrossNodeSafe=false` 显式声明。
+- [x] `Stage.Call`：显式注册、位置透明本地调用、deadline（WithDeadline/
+      WithTimeout）、错误分类透出（UnknownRole/whitelist/InvalidArgument
+      排队前拒绝）。
+- [x] `ActorSlot`：single-flight（并发首调只激活一次）、OnStage/OffStage、
+      Intermission（宿主显式 Sweep）、保存失败失效/重激活（Conflict/
+      InvalidActorState/ownership|invalidated → 丢弃未提交状态）。
+- [x] CallBoard：有界队列（depth/bytes 双上限）+ 单消费者 goroutine，严格串行
+      FIFO、排队过期（零副作用，CALL_TIMEOUT{queued}）、执行占用（超时不放行
+      旧 Turn，CALL_TIMEOUT{executing}/迟到 settle 同样按结果未知）、
+      MaxActivations 上限（仅约束新 slot 创建）。
+- [x] `Rehearsal` 测试运行时：固定 namespace、Memory Provider、可注入虚拟时钟、
+      显式 pump 确定性调度（Manual 模式）；Await 以 ctx 取消为逃逸口。
+- [x] goroutine 生命周期断言：Stage 关闭后消费者 goroutine 退出
+      （exited 通道 + NumGoroutine 回落断言，`-race` 必跑）。
+- [x] 类型安全 Turn：包级 `Turn[Args,Res,A]` 泛型构造（Go 方法不能带类型参数），
+      JSON 边界 + DisallowUnknownFields 排队前拒绝。
 
 **验收**（对齐 troupe.cr M1 反例集并移植）：并发首调只激活一次；100 个写
-Turn 不交错；排队过期无副作用；执行超时不放行旧 Turn；CAS/保存失败从最后
-提交快照恢复；任意目录名下 Rehearsal 一致；v1→v3 逐级迁移且失败不写；
-Stage 关闭零 goroutine 泄漏。
+Turn 不交错（经背压重试语义）；排队过期无副作用；执行超时不放行旧 Turn；
+CAS/保存失败从最后提交快照恢复；任意目录名下 Rehearsal 一致；v1→v3 逐级
+迁移且失败不写；Stage 关闭零 goroutine 泄漏。——39 测试 `go test -race`
+全绿（go1.26.0 windows），逐项对照见 [docs/verification.md](docs/verification.md)。
 
 ## M2：本地持久化、语义硬化和 API 收口
 
