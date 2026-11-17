@@ -52,25 +52,38 @@ CAS/保存失败从最后提交快照恢复；任意目录名下 Rehearsal 一�
 迁移且失败不写；Stage 关闭零 goroutine 泄漏。——39 测试 `go test -race`
 全绿（go1.26.0 windows），逐项对照见 [docs/verification.md](docs/verification.md)。
 
-## M2：本地持久化、语义硬化和 API 收口
+## M2：本地持久化、语义硬化和 API 收口（已完成，2026-11-17）
 
-- [ ] SQLite `PropStore`（`modernc.org/sqlite` 纯 Go）：单条 SQL 原子 CAS 与
-      fencing、重开恢复、`CrossNodeSafe()==false` 显式声明；
-      若纯 Go driver 成为瓶颈再评估 CGO 备选（决策记录进 docs）。
-- [ ] UnknownOutcome 模式证明（超时后原 Turn 占用通道至 settle、效果提交、
-      无自动重试）；幂等记录与 Props 单事务原子提交（同键同指纹重放/
-      不同指纹拒绝/失败重放/保留期过期）。
-- [ ] 协作取消全链路：`CallContext` → Turn 检查点 → transport cancel 信封（M3）。
-- [ ] 结构化 lifecycle/call metrics（计数器接口）、`slog` 事件、W3C traceparent
-      解析/派生（非法父静默降级、全零拒绝）、Turn 边界 Trace 事件。
-- [ ] 类型安全 `Agent`（泛型包装，编译期参数校验）、公开 API 文档
-      （`go doc`/pkg.go.dev）、minimal Cart 示例。
-- [ ] 基准五场景（对齐 troupe.cr bench/run.cr 口径：激活吞吐、KB/Actor、
-      热点 vs 分散、调度延迟、队列饱和）；本仓自基线，
-      跨语言比较交 troupe-bench-suite 统一口径。
+- [x] SQLite `PropStore`（`modernc.org/sqlite` 纯 Go，无 CGO 保住交叉编译）：
+      单条 UPDATE 内原子 CAS+fencing（WHERE 同时校验 revision 与当前 epoch）、
+      重开恢复、`CrossNodeSafe()==false` 显式声明；journal 表与 Props 同事务
+      提交（CAS 失败整体回滚）。
+- [x] UnknownOutcome 模式证明（M1 `TestExecutionTimeoutUnknownOutcome` 已覆盖：
+      超时后原 Turn 占用通道至 settle、效果提交、迟到成功仍按结果未知拒绝）；
+      幂等记录与 Props 单事务原子提交：`Idempotent(key, fingerprint, fn)`——
+      同键同指纹重放（Turn 照常执行、fn 跳过）/不同指纹拒绝/失败记录后重抛
+      （重放按记录重抛）/保留期过期视为新操作。
+- [x] 协作取消全链路：`CallFuture.Cancel` → `CancelSignal` → `CallContext.
+      CancelRequested` Turn 检查点提前收束（部分状态提交）；已 settle 返回
+      false；transport cancel 信封在 M3。
+- [x] 结构化 lifecycle/call metrics（`StageMetrics` 计数器，emit 单点更新）、
+      `slog` 事件适配（`SlogSink`）、W3C traceparent 解析/派生（非法父静默
+      降级、全零/大写/ff 版本拒绝）、Turn 边界 Trace 事件（completed/failed/
+      expired 经 `OnTrace`）。
+- [x] 类型安全调用：泛型 `Invoke[Args,Res]`（Go 方法不能自带类型参数，宏生成
+      方法的等价物为包级泛型函数；方法名仍走白名单）；公开 API 文档经 godoc；
+      minimal Cart 用法在 README。
+- [x] 基准五场景（对齐 troupe.cr bench/run.cr 口径）：激活吞吐 / KB/Actor
+      （`TestMemoryPerActor` ≈ 2.1 KB）/ 热点 vs 分散 / CPU 阻塞调度延迟
+      （`TestCpuSpinNeighborLatency`：spin 80ms 期间邻居延迟≈0，Go 抢占式
+      调度 vs troupe.cr Fiber"victim≈spin 全长"）/ 队列饱和显式拒绝；
+      CI 加 `-benchtime=1x` 冒烟；本仓自基线，跨语言比较交 troupe-bench-suite。
 
-**验收**：重启后恢复；复制边界一致（快照逃逸反例）；调用链可见；
-泛型/手写注册行为一致；所有过载路径有界并显式拒绝。
+**验收**：重启后恢复（SQLite 重开 + 新 Stage 重激活读回已提交状态）✅；
+复制边界一致（M1 快照隔离反例）✅；调用链可见（trace 事件含父/子
+traceparent）✅；泛型/手写注册行为一致（同一 manifest 双路径测试）✅；
+所有过载路径有界并显式拒绝 ✅。——52+2 测试 `go test -race` 全绿
+（go1.26.0 windows），基准与对照见 [docs/verification.md](docs/verification.md)。
 
 ## M3：共享状态与生产容错
 

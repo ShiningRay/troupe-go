@@ -112,10 +112,12 @@ type actorSlot struct {
 	executing    bool
 	closed       bool
 	exited       chan struct{} // live 模式：消费者 goroutine 退出时关闭（泄漏断言用）
+
+	emitTraceFn func(TraceEvent)
 }
 
 func newActorSlot(id ActorID, m manifestBase, store PropStore, ownership OwnershipStore,
-	clock Clock, cfg StageConfig, mode schedulerMode, emit func(StageEvent)) *actorSlot {
+	clock Clock, cfg StageConfig, mode schedulerMode, emit func(StageEvent), emitTrace func(TraceEvent)) *actorSlot {
 	s := &actorSlot{
 		id:           id,
 		manifest:     m,
@@ -125,6 +127,7 @@ func newActorSlot(id ActorID, m manifestBase, store PropStore, ownership Ownersh
 		cfg:          cfg,
 		live:         mode == schedulerLive,
 		emitFn:       emit,
+		emitTraceFn:  emitTrace,
 		wakeup:       make(chan struct{}, 1),
 		lastActivity: clock.Now(),
 		exited:       make(chan struct{}),
@@ -186,6 +189,25 @@ func (s *actorSlot) isClosed() bool {
 	return s.closed
 }
 
+// expireEnvelopes 锁外回复 queued 超时（零副作用）并产出事件/trace。
+func (s *actorSlot) expireEnvelopes(expired []*callEnvelope) {
+	now := s.clock.Now()
+	for _, env := range expired {
+		env.reply <- callReply{
+			err:       &CallTimeoutError{Phase: PhaseQueued, Method: env.method},
+			settledAt: now,
+		}
+		s.emitFn(StageEvent{Type: EventTurnExpired, ActorID: s.id, At: now, Method: env.method, Detail: PhaseQueued})
+		if s.emitTraceFn != nil {
+			s.emitTraceFn(TraceEvent{
+				CallID: env.callID, ActorID: s.id, Method: env.method,
+				OK: false, Outcome: "expired",
+				Traceparent: env.traceparent, ParentTraceparent: env.parentTraceparent, At: now,
+			})
+		}
+	}
+}
+
 // takeReady 取出下一个可执行请求；队首过期请求在锁外回复 queued 超时（零副作用）。
 func (s *actorSlot) takeReady() *callEnvelope {
 	s.mu.Lock()
@@ -195,14 +217,7 @@ func (s *actorSlot) takeReady() *callEnvelope {
 		s.lastActivity = s.clock.Now()
 	}
 	s.mu.Unlock()
-	now := s.clock.Now()
-	for _, env := range expired {
-		env.reply <- callReply{
-			err:       &CallTimeoutError{Phase: PhaseQueued, Method: env.method},
-			settledAt: now,
-		}
-		s.emitFn(StageEvent{Type: EventTurnExpired, ActorID: s.id, At: now, Method: env.method, Detail: PhaseQueued})
-	}
+	s.expireEnvelopes(expired)
 	return next
 }
 
@@ -232,14 +247,7 @@ func (s *actorSlot) pump() bool {
 		s.lastActivity = s.clock.Now()
 	}
 	s.mu.Unlock()
-	now := s.clock.Now()
-	for _, env := range expired {
-		env.reply <- callReply{
-			err:       &CallTimeoutError{Phase: PhaseQueued, Method: env.method},
-			settledAt: now,
-		}
-		s.emitFn(StageEvent{Type: EventTurnExpired, ActorID: s.id, At: now, Method: env.method, Detail: PhaseQueued})
-	}
+	s.expireEnvelopes(expired)
 	if next == nil {
 		return false
 	}
@@ -357,9 +365,6 @@ func (s *actorSlot) activate() (activation, error) {
 			return activation{}, err
 		}
 		record = &rec
-		if err != nil {
-			return activation{}, err
-		}
 	} else {
 		record, err = s.migrateIfNeeded(record, epoch)
 		if err != nil {
@@ -370,12 +375,25 @@ func (s *actorSlot) activate() (activation, error) {
 	if err != nil {
 		return activation{}, err
 	}
+	// 幂等 journal 激活时装载（未过期记录；过期条目按新操作处理）。
+	journal := make(map[string]IdempotencyRecord)
+	if js, ok := s.store.(JournalingStore); ok {
+		records, err := js.LoadJournal(s.id, s.clock.Now().Unix())
+		if err != nil {
+			return activation{}, err
+		}
+		for _, r := range records {
+			journal[r.Key] = r
+		}
+	}
 	ctx := &ActivationContext{
 		store:         s.store,
 		schemaVersion: s.manifest.schemaVer(),
 		Epoch:         epoch,
 		Revision:      record.Revision,
 		clock:         s.clock,
+		journal:       journal,
+		retention:     s.cfg.IdempotencyRetention,
 	}
 	act, err := s.manifest.buildActor(s.id, props, ctx)
 	if err != nil {
@@ -459,6 +477,13 @@ func (s *actorSlot) execute(req *callEnvelope) {
 			s.mu.Unlock()
 			req.reply <- callReply{value: raw, settledAt: settled}
 			s.emitFn(StageEvent{Type: EventTurnEnded, ActorID: s.id, At: settled, Method: req.method, Detail: "ok"})
+			if s.emitTraceFn != nil {
+				s.emitTraceFn(TraceEvent{
+					CallID: req.callID, ActorID: s.id, Method: req.method,
+					Duration: settled.Sub(started), OK: true, Outcome: "completed",
+					Traceparent: req.traceparent, ParentTraceparent: req.parentTraceparent, At: settled,
+				})
+			}
 			return
 		}
 	}
@@ -479,6 +504,13 @@ func (s *actorSlot) execute(req *callEnvelope) {
 	}
 	req.reply <- callReply{err: err, settledAt: settled}
 	s.emitFn(StageEvent{Type: EventTurnEnded, ActorID: s.id, At: settled, Method: req.method, Detail: "error"})
+	if s.emitTraceFn != nil {
+		s.emitTraceFn(TraceEvent{
+			CallID: req.callID, ActorID: s.id, Method: req.method,
+			Duration: settled.Sub(started), OK: false, Outcome: "failed",
+			Traceparent: req.traceparent, ParentTraceparent: req.parentTraceparent, At: settled,
+		})
+	}
 }
 
 func (s *actorSlot) clearExecuting() {

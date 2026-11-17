@@ -40,16 +40,19 @@ type StageConfig struct {
 	DefaultCallDeadline time.Duration // 未显式给 deadline 的默认响应期限
 	QueueOverheadBytes  int           // 每请求信封固定开销（入队字节预算）
 	IdleTimeout         time.Duration // >0 时 Sweep 以此判定空闲下线；0 = 不启用
+	// IdempotencyRetention 幂等记录保留期（过期后同键视为新操作；默认 7 天）。
+	IdempotencyRetention time.Duration
 }
 
 func DefaultStageConfig() StageConfig {
 	return StageConfig{
-		MaxQueueDepth:       64,
-		MaxQueueBytes:       256 * 1024,
-		MaxActivations:      1024,
-		DefaultCallDeadline: 30 * time.Second,
-		QueueOverheadBytes:  256,
-		IdleTimeout:         0,
+		MaxQueueDepth:        64,
+		MaxQueueBytes:        256 * 1024,
+		MaxActivations:       1024,
+		DefaultCallDeadline:  30 * time.Second,
+		QueueOverheadBytes:   256,
+		IdleTimeout:          0,
+		IdempotencyRetention: 7 * 24 * time.Hour,
 	}
 }
 
@@ -69,7 +72,9 @@ type Stage struct {
 	callSeq    uint64
 	closed     bool
 
+	metrics      *StageMetrics
 	eventHandler func(StageEvent)
+	traceHandler func(TraceEvent)
 }
 
 type StageOption func(*Stage)
@@ -96,6 +101,7 @@ func NewStage(opts ...StageOption) *Stage {
 		mode:       schedulerLive,
 		repertoire: make(map[string]manifestBase),
 		slots:      make(map[ActorID]*actorSlot),
+		metrics:    newStageMetrics(),
 	}
 	ownership := NewMemoryOwnershipStore()
 	s.ownership = ownership
@@ -112,10 +118,17 @@ func (s *Stage) Clock() Clock              { return s.clock }
 func (s *Stage) Config() StageConfig       { return s.cfg }
 func (s *Stage) Name() string              { return s.name }
 
+// Metrics 返回 Stage 计数器（activations/turns_completed/turns_failed 等）。
+func (s *Stage) Metrics() *StageMetrics { return s.metrics }
+
 // OnEvent 订阅结构化生命周期事件。
 func (s *Stage) OnEvent(fn func(StageEvent)) { s.eventHandler = fn }
 
+// OnTrace 订阅 Turn 边界 Trace 事件（OTel 桥接钩子；核心零 OTel 依赖）。
+func (s *Stage) OnTrace(fn func(TraceEvent)) { s.traceHandler = fn }
+
 func (s *Stage) emit(ev StageEvent) {
+	s.metrics.update(ev)
 	if s.eventHandler != nil {
 		s.eventHandler(ev)
 	}
@@ -243,15 +256,20 @@ func (s *Stage) prepareCall(id ActorID, method string, rawArgs json.RawMessage, 
 		}
 	}
 	bytes := len(method) + len(rawArgs) + s.cfg.QueueOverheadBytes
+	parent := o.traceparent
+	if !ValidTraceparent(parent) {
+		parent = "" // 非法父上下文静默降级
+	}
 	env := &callEnvelope{
-		callID:      s.callSeq,
-		method:      method,
-		args:        rawArgs,
-		deadline:    deadline,
-		reply:       make(chan callReply, 1),
-		bytes:       bytes,
-		cancel:      newCancelSignal(),
-		traceparent: o.traceparent,
+		callID:            s.callSeq,
+		method:            method,
+		args:              rawArgs,
+		deadline:          deadline,
+		reply:             make(chan callReply, 1),
+		bytes:             bytes,
+		cancel:            newCancelSignal(),
+		traceparent:       DeriveTraceparent(parent), // 本 Turn 自己的 span
+		parentTraceparent: parent,
 	}
 	slot, ok := s.slots[id]
 	if !ok {
@@ -262,7 +280,7 @@ func (s *Stage) prepareCall(id ActorID, method string, rawArgs json.RawMessage, 
 				Detail: fmt.Sprintf("Stage activation 数 %d 达上限 %d", len(s.slots), s.cfg.MaxActivations),
 			}
 		}
-		slot = newActorSlot(id, manifest, s.store, s.ownership, s.clock, s.cfg, s.mode, s.emit)
+		slot = newActorSlot(id, manifest, s.store, s.ownership, s.clock, s.cfg, s.mode, s.emit, s.emitTrace)
 		s.slots[id] = slot
 	}
 	return env, slot, nil

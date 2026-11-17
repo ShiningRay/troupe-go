@@ -10,14 +10,15 @@ import (
 // callEnvelope 排入 CallBoard 的一次调用请求。reply 为容量 1 的通道：
 // 每个请求恰好收到一次回复（调用方放弃等待不影响投递）。
 type callEnvelope struct {
-	callID      uint64
-	method      string
-	args        json.RawMessage
-	deadline    time.Time
-	reply       chan callReply
-	bytes       int
-	cancel      *CancelSignal
-	traceparent string
+	callID            uint64
+	method            string
+	args              json.RawMessage
+	deadline          time.Time
+	reply             chan callReply
+	bytes             int
+	cancel            *CancelSignal
+	traceparent       string // 本 Turn 自己的 W3C span（由调用方父上下文派生）
+	parentTraceparent string // 调用方传入并校验后的父上下文（空表示新 trace）
 }
 
 type callReply struct {

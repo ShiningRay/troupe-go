@@ -2,21 +2,34 @@ package troupe
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 )
 
 // ActivationContext 一次激活的所有权与存储视图。Revision 由 Save 原子推进。
-// （幂等记录与 Outbox journal 在 M2/M3 扩展，对齐 troupe.cr 同路径。）
+// journal 为激活时装载的幂等记录（未过期）；Outbox journal 在 M3 扩展。
 type ActivationContext struct {
 	store         PropStore
 	schemaVersion int
 	Epoch         uint64
 	Revision      uint64
 	clock         Clock
+	journal       map[string]IdempotencyRecord
+	retention     time.Duration
 }
 
 func (c *ActivationContext) Now() time.Time { return c.clock.Now() }
+
+// writeJournaled Props CAS 与幂等记录同事务提交；store 不支持 JournalingStore 时显式报错。
+func (c *ActivationContext) writeJournaled(id ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord) (PropRecord, error) {
+	js, ok := c.store.(JournalingStore)
+	if !ok {
+		return PropRecord{}, &InvalidActorStateError{Detail: "当前 PropStore 不支持幂等 journal（需实现 JournalingStore）"}
+	}
+	return js.WriteJournaled(id, expectedRevision, schemaVersion, data, epoch, journal)
+}
 
 // Props 是可恢复状态的契约标记：必须是纯数据 DTO（encoding/json 可往返），
 // 禁止 func/chan/goroutine/互斥锁等运行时对象进入 Props（DESIGN §6）。
@@ -70,6 +83,60 @@ func (a *Actor[P]) OnStage() error  { return nil }
 func (a *Actor[P]) OffStage() error { return nil }
 
 func (a *Actor[P]) actorID() ActorID { return a.id }
+
+// Idempotent 幂等执行（对齐 troupe.cr 失败语义）：
+//   - 同键同指纹 → 重放首次结果（或重抛首次错误）；
+//   - 同键不同指纹 → IdempotencyConflictError；
+//   - fn 只修改内存 Props、不要 Save：helper 在 fn settle 后把 Props 变更 + 幂等
+//     记录**一次原子提交**（WriteJournaled）；失败也记录，重放时按记录重抛；
+//   - 过期（ExpiresAt）后同键视为新操作。保留期 = StageConfig.IdempotencyRetention。
+func (a *Actor[P]) Idempotent(key, fingerprint string, fn func() (any, error)) (json.RawMessage, error) {
+	ctx := a.actx
+	now := ctx.clock.Now().Unix()
+	if existing, ok := ctx.journal[key]; ok && existing.ExpiresAt > now {
+		if existing.Fingerprint != fingerprint {
+			return nil, &IdempotencyConflictError{
+				Detail: "幂等键 " + quote(key) + " 已用于不同参数指纹（" + existing.Fingerprint + " ≠ " + fingerprint + "）",
+			}
+		}
+		if existing.OK {
+			return json.RawMessage(existing.Value), nil
+		}
+		return nil, errors.New("幂等重放：首次执行失败（" + existing.ErrorClass + ": " + existing.ErrorMessage + "）")
+	}
+	expiresAt := ctx.clock.Now().Add(ctx.retention).Unix()
+	value, err := fn()
+	record := IdempotencyRecord{Key: key, Fingerprint: fingerprint, ExpiresAt: expiresAt}
+	var raw json.RawMessage
+	if err != nil {
+		record.OK = false
+		record.ErrorClass = fmt.Sprintf("%T", err)
+		record.ErrorMessage = err.Error()
+	} else {
+		b, merr := json.Marshal(value)
+		if merr != nil {
+			return nil, fmt.Errorf("幂等结果序列化失败：%w", merr)
+		}
+		record.OK = true
+		record.Value = string(b)
+		raw = b
+	}
+	// Props 变更（fn 内存修改）与幂等记录一次原子提交。
+	data, serr := json.Marshal(a.props)
+	if serr != nil {
+		return nil, &InvalidActorStateError{Detail: "props 序列化失败：" + serr.Error()}
+	}
+	rec, werr := ctx.writeJournaled(a.id, ctx.Revision, ctx.schemaVersion, string(data), ctx.Epoch, []IdempotencyRecord{record})
+	if werr != nil {
+		return nil, werr
+	}
+	ctx.Revision = rec.Revision
+	ctx.journal[key] = record
+	if err != nil {
+		return nil, err // 失败记录已提交后重抛原错误（重放时按记录重抛）
+	}
+	return raw, nil
+}
 
 // CancelSignal 协作取消信号（DESIGN §5 时间与取消）：仅置位标志，Turn 是否/何时
 // 响应由 Actor 代码决定。框架不会强行终止 Turn；取消不改变副作用语义

@@ -5,11 +5,14 @@
 （strict 串行 / 三码分离 CAS+schemaVersion+epoch fencing / 有界拒绝 /
 UnknownOutcome / golden 向量对齐）。
 
-> **当前状态：M1 单机核心。** 已实现 canonical ActorID / 规范哈希 / 错误码表
-> （golden 向量锚定）+ Memory PropStore（CAS+fencing）/ Role manifest（类型安全
-> Turn）/ Stage / ActorSlot（single-flight）/ 有界 CallBoard / Intermission /
-> Rehearsal 确定性测试运行时。39 测试 `-race` 全绿。SQLite/PostgreSQL、TCP
-> transport、集群路由与持久 reminder 尚未实现（M2/M3）——不要据此宣称跨节点恢复。
+> **当前状态：M2 本地持久化与语义硬化。** 在 M1 单机核心（Memory PropStore /
+> Role manifest 类型安全 Turn / Stage / ActorSlot single-flight / 有界
+> CallBoard / Intermission / Rehearsal 确定性测试运行时）之上，新增 SQLite
+> Provider（纯 Go，重开恢复）、幂等记录与 Props 原子提交、协作取消、metrics
+> 计数器、slog 事件、W3C traceparent 与 Turn 边界 Trace 事件、泛型
+> `Invoke`、五场景基线基准。54 测试 `-race` 全绿。PostgreSQL（跨节点接管）、
+> TCP transport、集群路由与持久 reminder 尚未实现（M3）——不要据此宣称
+> 跨节点恢复或集群可用。
 
 ## 文档
 

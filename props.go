@@ -73,11 +73,31 @@ func (m *MemoryOwnershipStore) Renew(actorID ActorID, epoch uint64) bool {
 	return m.epochs[actorID] == epoch
 }
 
+// IdempotencyRecord 幂等请求记录（与 Props 同事务原子提交；docs/persistence 失败语义）。
+type IdempotencyRecord struct {
+	Key          string
+	Fingerprint  string
+	OK           bool
+	Value        string // OK 时为结果 JSON
+	ErrorClass   string
+	ErrorMessage string
+	ExpiresAt    int64 // unix 秒；过期后同键视为新操作
+}
+
+// JournalingStore 幂等日志能力（可选能力接口；Memory/SQLite/PG 实现）。
+// WriteJournaled 把 Props CAS 与幂等记录在同一次原子提交内落盘（失败则两者都不生效）。
+type JournalingStore interface {
+	PropStore
+	WriteJournaled(actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord) (PropRecord, error)
+	// LoadJournal 返回未过期的幂等记录（激活时装载）。
+	LoadJournal(actorID ActorID, nowUnix int64) ([]IdempotencyRecord, error)
+}
+
 // PropStore 契约（DESIGN §7）：
 //   - Create 原子存在检查；已存在即 *ConflictError{exists}。
 //   - Write 以 expectedRevision + epoch 原子 CAS；fencing 必须在 Provider 层校验，
 //     epoch != current 一律拒绝（*CallRejectedError{ownership}），不允许应用层先读后写。
-//     幂等记录与 Props 同一次原子提交在 M2 扩展（troupe.cr 同路径）。
+//     幂等记录与 Props 同一次原子提交经 JournalingStore 能力接口（M2）。
 //   - CrossNodeSafe 声明 Provider 能力：Memory/SQLite/File 为 false（仅进程/单机持久，
 //     不能用于跨节点恢复）；生产模式（M3）必须拒绝以此类 Provider 声称接管语义。
 type PropStore interface {
@@ -93,12 +113,14 @@ type PropStore interface {
 type MemoryPropStore struct {
 	mu        sync.Mutex
 	records   map[ActorID]PropRecord
+	journals  map[ActorID]map[string]IdempotencyRecord
 	ownership OwnershipStore
 }
 
 func NewMemoryPropStore(ownership OwnershipStore) *MemoryPropStore {
 	return &MemoryPropStore{
 		records:   make(map[ActorID]PropRecord),
+		journals:  make(map[ActorID]map[string]IdempotencyRecord),
 		ownership: ownership,
 	}
 }
@@ -161,4 +183,47 @@ func (m *MemoryPropStore) assertFencing(actorID ActorID, epoch uint64) error {
 		}
 	}
 	return nil
+}
+
+// WriteJournaled 幂等 journal 与 Props 同锁原子提交（CAS/fencing 失败则 journal 不写）。
+func (m *MemoryPropStore) WriteJournaled(actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord) (PropRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.records[actorID]
+	if !ok {
+		return PropRecord{}, &ConflictError{Kind: ConflictRevision, Actor: actorID.Canonical()}
+	}
+	if err := m.assertFencing(actorID, epoch); err != nil {
+		return PropRecord{}, err
+	}
+	if rec.Revision != expectedRevision {
+		return PropRecord{}, &ConflictError{Kind: ConflictRevision, Actor: actorID.Canonical()}
+	}
+	updated := PropRecord{Revision: rec.Revision + 1, SchemaVersion: schemaVersion, Data: data, Epoch: epoch}
+	m.records[actorID] = updated
+	jm := m.journals[actorID]
+	if jm == nil {
+		jm = make(map[string]IdempotencyRecord)
+		m.journals[actorID] = jm
+	}
+	for _, entry := range journal {
+		jm[entry.Key] = entry
+	}
+	return updated, nil
+}
+
+func (m *MemoryPropStore) LoadJournal(actorID ActorID, nowUnix int64) ([]IdempotencyRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	jm := m.journals[actorID]
+	if len(jm) == 0 {
+		return nil, nil
+	}
+	out := make([]IdempotencyRecord, 0, len(jm))
+	for _, entry := range jm {
+		if entry.ExpiresAt > nowUnix {
+			out = append(out, entry)
+		}
+	}
+	return out, nil
 }
