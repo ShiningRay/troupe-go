@@ -17,8 +17,9 @@ type callEnvelope struct {
 	reply             chan callReply
 	bytes             int
 	cancel            *CancelSignal
-	traceparent       string // 本 Turn 自己的 W3C span（由调用方父上下文派生）
-	parentTraceparent string // 调用方传入并校验后的父上下文（空表示新 trace）
+	traceparent       string   // 本 Turn 自己的 W3C span（由调用方父上下文派生）
+	parentTraceparent string   // 调用方传入并校验后的父上下文（空表示新 trace）
+	mode              TurnMode // strict 串行 / read_only/improv 并发快照（M4）
 }
 
 type callReply struct {

@@ -104,15 +104,16 @@ type actorSlot struct {
 	live      bool
 	emitFn    func(StageEvent)
 
-	mu           sync.Mutex
-	board        turnBoard
-	wakeup       chan struct{}
-	state        slotState
-	act          *activation
-	lastActivity time.Time
-	executing    bool
-	closed       bool
-	exited       chan struct{} // live 模式：消费者 goroutine 退出时关闭（泄漏断言用）
+	mu                 sync.Mutex
+	board              turnBoard
+	wakeup             chan struct{}
+	state              slotState
+	act                *activation
+	lastActivity       time.Time
+	executing          bool
+	concurrentInflight int // read_only/improv 并发在飞（quiesce/drain 判定包含）
+	closed             bool
+	exited             chan struct{} // live 模式：消费者 goroutine 退出时关闭（泄漏断言用）
 
 	emitTraceFn func(TraceEvent)
 
@@ -144,6 +145,7 @@ func newActorSlot(id ActorID, m manifestBase, store PropStore, ownership Ownersh
 }
 
 func (s *actorSlot) enqueue(req *callEnvelope) error {
+	concurrent := req.mode != ModeStrict
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -152,6 +154,19 @@ func (s *actorSlot) enqueue(req *callEnvelope) error {
 			Actor:  s.id.Canonical(),
 			Detail: "Actor 已关闭，拒收新 Call（method " + req.method + "）",
 		}
+	}
+	if concurrent {
+		// read_only/improv：不占 strict 串行队列（写不饥饿）；
+		// quiesce/drain 判定包含并发在飞。
+		s.concurrentInflight++
+		s.lastActivity = s.clock.Now()
+		s.mu.Unlock()
+		if s.live {
+			go s.executeConcurrent(req)
+		} else {
+			s.executeConcurrent(req) // Manual：调用方同 goroutine 同步执行（确定性）
+		}
+		return nil
 	}
 	err := s.board.push(req, s.cfg.MaxQueueDepth, s.cfg.MaxQueueBytes)
 	if err != nil {
@@ -275,7 +290,117 @@ func (s *actorSlot) lastActivityTime() time.Time {
 func (s *actorSlot) idle() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return !s.executing && s.board.empty()
+	// quiesce/drain 判定：无 strict 执行中、无排队、无并发 read_only/improv 在飞
+	return !s.executing && s.board.empty() && s.concurrentInflight == 0
+}
+
+// executeConcurrent read_only/improv 并发执行：不占 strict 串行队列；
+// 在**已提交快照**上执行（影子 actor）。read_only 禁写（Save 显式拒绝）；
+// improv Save 以激活时 revision CAS——冲突显式拒绝（ConflictError），禁止隐式覆盖。
+// 影子 Turn 失败不失效主激活（错误只归本 Turn）。
+func (s *actorSlot) executeConcurrent(req *callEnvelope) {
+	defer func() {
+		s.mu.Lock()
+		s.concurrentInflight--
+		s.mu.Unlock()
+	}()
+	started := s.clock.Now()
+	act, err := s.ensureActivated()
+	if err != nil {
+		now := s.clock.Now()
+		req.reply <- callReply{err: err, settledAt: now}
+		s.emitFn(StageEvent{Type: EventActivationFailed, ActorID: s.id, At: now, Method: req.method, Detail: err.Error()})
+		return
+	}
+	s.emitFn(StageEvent{Type: EventTurnStarted, ActorID: s.id, At: started, Method: req.method, Detail: "concurrent"})
+
+	// 已提交快照：并发 Turn 看到最新提交状态（不含 strict 未提交状态）
+	snap, err := s.store.Read(s.baseCtx, s.id)
+	if err != nil {
+		now := s.clock.Now()
+		req.reply <- callReply{err: &ActivationError{Detail: "快照读取失败：" + err.Error(), Cause: err}, settledAt: now}
+		s.emitFn(StageEvent{Type: EventTurnEnded, ActorID: s.id, At: now, Method: req.method, Detail: "error"})
+		return
+	}
+	if snap == nil {
+		now := s.clock.Now()
+		req.reply <- callReply{err: &ActivationError{Detail: "快照不存在（未激活即并发）"}, settledAt: now}
+		s.emitFn(StageEvent{Type: EventTurnEnded, ActorID: s.id, At: now, Method: req.method, Detail: "error"})
+		return
+	}
+	shadowProps, err := s.manifest.parseFinal(snap.Data)
+	if err != nil {
+		now := s.clock.Now()
+		req.reply <- callReply{err: &ActivationError{Detail: "快照解析失败：" + err.Error(), Cause: err}, settledAt: now}
+		s.emitFn(StageEvent{Type: EventTurnEnded, ActorID: s.id, At: now, Method: req.method, Detail: "error"})
+		return
+	}
+	shadowCtx := &ActivationContext{
+		store:         s.store,
+		schemaVersion: s.manifest.schemaVer(),
+		Epoch:         act.actx.Epoch,
+		Revision:      snap.Revision, // improv Save 以激活时 revision CAS——冲突显式拒绝
+		clock:         s.clock,
+		journal:       make(map[string]IdempotencyRecord),
+		outbox:        make(map[string]OutboxRecord),
+		retention:     s.cfg.IdempotencyRetention,
+		storeCtx:      s.baseCtx,
+		writable:      req.mode == ModeImprov, // read_only 禁写；improv 可写（快照 CAS）
+	}
+	shadowAct, err := s.manifest.buildActor(s.id, shadowProps, shadowCtx)
+	if err != nil {
+		now := s.clock.Now()
+		req.reply <- callReply{err: &ActivationError{Detail: "影子 actor 构建失败：" + err.Error(), Cause: err}, settledAt: now}
+		s.emitFn(StageEvent{Type: EventTurnEnded, ActorID: s.id, At: now, Method: req.method, Detail: "error"})
+		return
+	}
+
+	callCtx := &CallContext{
+		CallID:      req.callID,
+		ActorID:     s.id,
+		Method:      req.method,
+		Deadline:    req.deadline,
+		clock:       s.clock,
+		cancel:      req.cancel,
+		Traceparent: req.traceparent,
+	}
+	value, err := s.manifest.invokeTurn(shadowAct, callCtx, req.method, req.args)
+	settled := s.clock.Now()
+	if err == nil {
+		var raw json.RawMessage
+		if value != nil {
+			b, merr := json.Marshal(value)
+			if merr != nil {
+				err = fmt.Errorf("turn %s 结果序列化失败：%w", req.method, merr)
+			} else {
+				raw = b
+			}
+		} else {
+			raw = json.RawMessage("null")
+		}
+		if err == nil {
+			req.reply <- callReply{value: raw, settledAt: settled}
+			s.emitFn(StageEvent{Type: EventTurnEnded, ActorID: s.id, At: settled, Method: req.method, Detail: "ok"})
+			if s.emitTraceFn != nil {
+				s.emitTraceFn(TraceEvent{
+					CallID: req.callID, ActorID: s.id, Method: req.method,
+					Duration: settled.Sub(started), OK: true, Outcome: "completed",
+					Traceparent: req.traceparent, ParentTraceparent: req.parentTraceparent, At: settled,
+				})
+			}
+			return
+		}
+	}
+	// 失败路径：影子 actor 错误只归本 Turn——主激活不失效
+	req.reply <- callReply{err: err, settledAt: settled}
+	s.emitFn(StageEvent{Type: EventTurnEnded, ActorID: s.id, At: settled, Method: req.method, Detail: "error"})
+	if s.emitTraceFn != nil {
+		s.emitTraceFn(TraceEvent{
+			CallID: req.callID, ActorID: s.id, Method: req.method,
+			Duration: settled.Sub(started), OK: false, Outcome: "failed",
+			Traceparent: req.traceparent, ParentTraceparent: req.parentTraceparent, At: settled,
+		})
+	}
 }
 
 // close 关闭：停收新请求、清空队列（逐个回复 shutdown 拒绝）、下线实例并停止消费者。
@@ -416,6 +541,7 @@ func (s *actorSlot) activate() (activation, error) {
 		outbox:        outboxJournal,
 		retention:     s.cfg.IdempotencyRetention,
 		storeCtx:      s.baseCtx,
+		writable:      true, // 主激活可写
 	}
 	act, err := s.manifest.buildActor(s.id, props, actCtx)
 	if err != nil {

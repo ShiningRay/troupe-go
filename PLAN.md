@@ -113,23 +113,27 @@ TCP 反例（超限/CRC/magic/认证/deadline executing/断连 UnknownOutcome/ca
 传播/in-flight）11 用例 ✅；CI postgres service 必跑故障用例 ✅。
 ——证据逐项见 [docs/verification.md](docs/verification.md) M3 节。
 
-## M4：调度扩展与实时 Show
+## M4：调度扩展与实时 Show（已完成，2026-11-17）
 
-- [ ] 调度模式：strict（默认）/ `read_only`（并发已提交快照，禁写——save 显式
+- [x] 调度模式：strict（默认）/ `read_only`（并发已提交快照，禁写——save 显式
       拒绝）/ `improv`（并发可写副本，save 以激活时 revision CAS，冲突显式拒绝）；
       写饥饿反例（长只读阻塞期间 strict 立即完成）与 quiesce 反例
       （drain/idle 等待并发在飞）。
-- [ ] Show realtime：`ShowHub`/`Show`——Actor Audience 经完整 Turn 交付
+- [x] Show realtime：`ShowHub`/`Show`——Actor Audience 经完整 Turn 交付
       （白名单/串行/持久化语义不变），边界回调（非 Actor 观察者）与 Actor
       订阅分离；在线尽力放弃不重投；跨 Stage 订阅显式绑定；
       慢订阅者背压隔离（failed 不影响其他订阅者）；离线不保证。
-- [ ] `Director` + HTTP 端点（`net/http`）：/health /metrics /events +
+- [x] `Director` + HTTP 端点（`net/http`）：/health /metrics /events +
       pprof；health（running/draining/closed）、per-Stage 计数
       （activation_failures/save_failures/turns_expired/turns_failed）、
       recent_events 环形样本（内存有界）；管理写操作不经 HTTP；CLI 演示。
 
-**验收**：交错组合矩阵、无写饥饿、慢订阅者不耗尽全局内存；
-不将 Show 称为持久流。
+**验收**（✅ 2026-11-17）：写饥饿反例（长只读阻塞期间
+strict 立即完成）✅；只读快照隔离与禁写 ✅；improv 冲突显式拒绝且影子失败不
+失效主激活 ✅；quiesce 等待并发在飞 ✅；Show 全语义（Audience 经 Turn/边界
+回调隔离/背压隔离/离线不保证/退订/超时放弃）✅；Director health/metrics/
+events 环形有界 + pprof，管理写不经 HTTP ✅；examples/cart 与 examples/
+director CI 冒烟 ✅。证据见 [docs/verification.md](docs/verification.md) M4 节。
 
 ## M5：可靠消息、目录与互操作（统一 ADR 后）
 

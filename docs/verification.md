@@ -101,3 +101,36 @@
   - PG 测试 openPair 以 TRUNCATE 清共享库残留（容器跨 go test 持久）。
   - ec 稳定码 vs troupe.cr 类名差异：以 ADR 0001 提案（troupe-errors/1 码表）为准，
     待 troupe-planning 采纳后全语言统一。
+
+## M4：调度扩展与实时 Show（2026-11-17）
+
+- 环境：go1.26.0 windows/amd64。
+- 命令：`go test -race -count=1 ./...`、`go test -race -count=3 -run "TestShow|TestDirector|TestHTTP|TestReadOnly|TestImprov|TestQuiesce" .`、
+  `go run ./examples/cart`。
+- 结果：全仓用例 `-race` 全绿（root 77 / transport 11 / PG 7）。验收对照（PLAN M4）：
+
+| 验收项 | 证据 |
+|---|---|
+| 写饥饿反例 | `TestReadOnlyNoWriteStarvation`（长只读阻塞闸门期间 strict 立即完成，延迟阈值断言） |
+| 只读快照隔离 + 禁写 | `TestReadOnlySnapshotIsolationAndNoWrite`（只读见已提交快照；Save → InvalidActorStateError） |
+| improv 冲突显式拒绝 | `TestImprovConflictExplicitRejection`（快照读取与 Save 间外部交错 → ConflictError{revision}；影子失败不失效主激活、不产生 save_failed；外部写后主激活 strict Save 按既有语义冲突失效重激活） |
+| quiesce 等待并发在飞 | `TestQuiesceWaitsConcurrentInflight`（并发在飞期间 Idle=false、finish 拒绝；完成后排空停机） |
+| Show Actor Audience 经 Turn | `TestShowActorAudienceViaFullTurn`（交付经 Stage 管道：Props 持久化副作用可见；未订阅 topic 全零报告） |
+| 边界回调分离 + panic 隔离 | `TestShowExternalCallbackAndIsolation`（回调 panic 计 failed 不影响其他订阅者） |
+| 慢订阅者背压隔离 | `TestShowSlowSubscriberBackpressureIsolation`（跨 Stage 绑定；慢订阅者队列满 failed=1、健康订阅者 delivered=1） |
+| 离线不保证 | `TestShowOfflineNotGuaranteed`（draining/closed 发布 → failed） |
+| 退订/超时放弃 | `TestShowUnsubscribeAndPublishTimeout`（退订后不交付；deadline 到期 failed 返回不阻塞） |
+| Director 健康/指标/事件 | `TestDirectorHealthMetricsEvents`（running/draining/closed、metrics 快照、recent_events 环形 ≤200、管理 API drain/shutdown） |
+| HTTP 端点 + pprof | `TestHTTPHealthEndpoint`（/health /metrics /events /debug/pprof/ 全可达；管理写不经 HTTP——无写路由） |
+| 示例冒烟 | `go run ./examples/cart`（激活钩子/类型安全 Turn/只读 peek/Invoke）+ examples/director 构建 |
+
+- 实现注记：
+  - **emit 重入死锁（实测发现并修复）**：Director.AddStage 运行时重挂 OnEvent
+    与消费者 goroutine 的 emit 读存在数据竞争（-race 捕获）；修复时初版用
+    stage.mu 导致 prepareCall 持锁路径上的 emit 自死锁（白名单拒绝悬挂）——
+    最终以独立 `handlerMu sync.RWMutex` 解决。此为 Go 版相对 troupe.cr 的新坑：
+    Crystal 同步原语不可重入但锁分离习惯不同。
+  - Manual 模式并发 Turn 在 stage.Call 调用方 goroutine 内同步执行（确定性）；
+    异步在飞场景（quiesce/背压）以 live 模式验证。
+  - improv 的冲突 = Turn 开跑时快照 revision 与提交时 store revision 的 CAS 差；
+    Manual 同步执行下快照读取与提交之间无法交错（天然无冲突），冲突测试需 live + gate。

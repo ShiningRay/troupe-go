@@ -12,6 +12,31 @@ import (
 // Empty 表示无参数/无返回值 Turn 的占位类型（JSON null 往返无副作用）。
 type Empty struct{}
 
+// TurnMode Turn 调度类别（M4，对齐 troupe.cr 语义）：
+//   - ModeStrict（默认）：串行独占，执行占用不放行后续 Turn；
+//   - ModeReadOnly：并发执行于已提交快照（影子 actor），禁写（Save 显式拒绝），
+//     不占 strict 串行队列（写不饥饿）；
+//   - ModeImprov：并发执行于已提交快照副本，Save 以激活时 revision CAS——
+//     冲突显式拒绝（ConflictError），禁止隐式覆盖。
+type TurnMode int
+
+const (
+	ModeStrict TurnMode = iota
+	ModeReadOnly
+	ModeImprov
+)
+
+func (m TurnMode) String() string {
+	switch m {
+	case ModeReadOnly:
+		return "read_only"
+	case ModeImprov:
+		return "improv"
+	default:
+		return "strict"
+	}
+}
+
 // isNilHandle 判定工厂返回的指针是否为 nil（typed-nil 不落入接口nil 陷阱）。
 func isNilHandle[A any](h A) bool {
 	v := reflect.ValueOf(h)
@@ -78,23 +103,30 @@ type actorHandle interface {
 // activation 一次激活的实例与其可选钩子。
 type activation struct {
 	handle actorHandle
-	hooks  StageHooks // nil 表示未实现 StageHooks
+	hooks  StageHooks         // nil 表示未实现 StageHooks
+	actx   *ActivationContext // 主激活存储视图（并发影子 Turn 的 epoch 来源）
 }
 
 // TurnDef 经 troupe.Turn 包级泛型函数构造（Go 方法不能自带类型参数），
 // 由 Manifest.Turn 登记到白名单。
 type TurnDef[A any] struct {
 	name     string
+	mode     TurnMode
 	invoke   func(a A, ctx *CallContext, args json.RawMessage) (any, error)
 	validate func(args json.RawMessage) error
 }
 
 // Turn 构造类型安全 Turn 定义：参数经 JSON 边界反序列化（排队前 validate
 // 预检，缺参/类型不符 → InvalidArgumentError，零副作用）；返回值经 JSON 边界
-// 序列化后回给调用方。类型参数由 fn 签名推导。
-func Turn[Args, Res any, A any](name string, fn func(A, *CallContext, Args) (Res, error)) TurnDef[A] {
+// 序列化后回给调用方。类型参数由 fn 签名推导；mode 可选（默认 ModeStrict）。
+func Turn[Args, Res any, A any](name string, fn func(A, *CallContext, Args) (Res, error), mode ...TurnMode) TurnDef[A] {
+	turnMode := ModeStrict
+	if len(mode) > 0 {
+		turnMode = mode[0]
+	}
 	return TurnDef[A]{
 		name: name,
+		mode: turnMode,
 		invoke: func(a A, ctx *CallContext, raw json.RawMessage) (any, error) {
 			var args Args
 			if err := decodeTurnArgs(raw, &args); err != nil {
@@ -137,6 +169,7 @@ type manifestBase interface {
 	buildActor(id ActorID, props any, ctx *ActivationContext) (activation, error)
 	invokeTurn(act activation, ctx *CallContext, method string, raw json.RawMessage) (any, error)
 	validateArgs(method string, raw json.RawMessage) error
+	turnModeOf(method string) TurnMode
 	validateManifest() error
 }
 
@@ -217,6 +250,13 @@ func (m *Manifest[P, A]) turnList() []string {
 	return names
 }
 
+func (m *Manifest[P, A]) turnModeOf(method string) TurnMode {
+	if def, ok := m.turns[method]; ok {
+		return def.mode
+	}
+	return ModeStrict // 未注册方法返回 strict（白名单先行拒绝）
+}
+
 func (m *Manifest[P, A]) initialJSON() (string, error) {
 	if m.initial == nil {
 		return "", fmt.Errorf("角色 %s 缺少 initial Props 工厂", m.role)
@@ -278,7 +318,7 @@ func (m *Manifest[P, A]) buildActor(id ActorID, propsv any, ctx *ActivationConte
 	if sh, ok := any(h).(StageHooks); ok {
 		hooks = sh
 	}
-	return activation{handle: h, hooks: hooks}, nil
+	return activation{handle: h, hooks: hooks, actx: ctx}, nil
 }
 
 func (m *Manifest[P, A]) invokeTurn(act activation, ctx *CallContext, method string, raw json.RawMessage) (any, error) {

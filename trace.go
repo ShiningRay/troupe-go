@@ -81,9 +81,12 @@ type TraceEvent struct {
 	At                time.Time
 }
 
-// emitTrace 经 Stage 分发（slot 回调）。
+// emitTrace 经 Stage 分发（slot 回调；handler 字段经 stage 锁同步）。
 func (s *Stage) emitTrace(ev TraceEvent) {
-	if s.traceHandler != nil {
-		s.traceHandler(ev)
+	s.handlerMu.RLock()
+	h := s.traceHandler
+	s.handlerMu.RUnlock()
+	if h != nil {
+		h(ev)
 	}
 }

@@ -25,6 +25,10 @@ type ActivationContext struct {
 	outbox        map[string]OutboxRecord
 	retention     time.Duration
 	storeCtx      context.Context
+	// writable=false 为 read_only 影子 ctx：Save 显式拒绝（快照只读）。
+	// improv 影子 ctx writable=true 且 Revision 固定为激活时快照——Save 走 CAS，
+	// 冲突显式拒绝（禁止隐式覆盖）。
+	writable bool
 }
 
 // StoreCtx 返回存储操作上下文（随 Stage 生命周期取消）。
@@ -91,6 +95,10 @@ func (a *Actor[P]) SchemaVersion() int { return a.actx.schemaVersion }
 // （含待提交幂等记录与 outbox 事件——同事务原子提交）。
 // 失败（CAS 冲突 / fencing 拒绝）会使实例失效：后续调用从最后已提交快照重新激活。
 func (a *Actor[P]) Save() error {
+	// read_only 影子 ctx 禁写（快照只读，PLAN M4）
+	if !a.actx.writable {
+		return &InvalidActorStateError{Detail: "read_only Turn 不允许修改 Props（快照只读）"}
+	}
 	data, err := json.Marshal(a.props)
 	if err != nil {
 		return &InvalidActorStateError{Detail: "props 序列化失败：" + err.Error()}

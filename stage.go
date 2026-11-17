@@ -76,7 +76,9 @@ type Stage struct {
 	closed     bool
 	draining   bool
 
-	metrics      *StageMetrics
+	metrics *StageMetrics
+
+	handlerMu    sync.RWMutex // 独立于 stage.mu：emit 在持锁路径上被调用（不可重入）
 	eventHandler func(StageEvent)
 	traceHandler func(TraceEvent)
 }
@@ -126,16 +128,28 @@ func (s *Stage) Name() string              { return s.name }
 // Metrics 返回 Stage 计数器（activations/turns_completed/turns_failed 等）。
 func (s *Stage) Metrics() *StageMetrics { return s.metrics }
 
-// OnEvent 订阅结构化生命周期事件。
-func (s *Stage) OnEvent(fn func(StageEvent)) { s.eventHandler = fn }
+// OnEvent 订阅结构化生命周期事件（可运行时重挂——Director 接管事件流；
+// handler 字段经 stage 锁同步，消费者 goroutine 与订阅方无竞态）。
+func (s *Stage) OnEvent(fn func(StageEvent)) {
+	s.handlerMu.Lock()
+	s.eventHandler = fn
+	s.handlerMu.Unlock()
+}
 
 // OnTrace 订阅 Turn 边界 Trace 事件（OTel 桥接钩子；核心零 OTel 依赖）。
-func (s *Stage) OnTrace(fn func(TraceEvent)) { s.traceHandler = fn }
+func (s *Stage) OnTrace(fn func(TraceEvent)) {
+	s.handlerMu.Lock()
+	s.traceHandler = fn
+	s.handlerMu.Unlock()
+}
 
 func (s *Stage) emit(ev StageEvent) {
 	s.metrics.update(ev)
-	if s.eventHandler != nil {
-		s.eventHandler(ev)
+	s.handlerMu.RLock()
+	h := s.eventHandler
+	s.handlerMu.RUnlock()
+	if h != nil {
+		h(ev)
 	}
 }
 
@@ -277,6 +291,7 @@ func (s *Stage) prepareCall(id ActorID, method string, rawArgs json.RawMessage, 
 		bytes:             bytes,
 		cancel:            newCancelSignal(),
 		traceparent:       DeriveTraceparent(parent), // 本 Turn 自己的 span
+		mode:              manifest.turnModeOf(method),
 		parentTraceparent: parent,
 	}
 	slot, ok := s.slots[id]
