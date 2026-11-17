@@ -3,7 +3,7 @@
 > 状态：M0 设计与验证基线（canonical identity / 规范哈希 / 错误码表已由 golden
 > 向量锚定）。以 Orleans 10.0 为主要语义参照；继承 troupe.cr 全部里程碑经验
 > （M1 单机核心 → M2 持久化/硬化 → M3 PG/TCP/集群 → M4 调度/Show → M5 流/目录
-> → M6 生态）。跨语言共同决策由 [troupe-planning](https://github.com/ShiningRay/troupe-planning) 协调。
+> → M6 生态）。跨语言共同决策由 [troupe-planning](https://github.com/ShiningRay/troupe) 协调。
 
 ## 1. 目标
 

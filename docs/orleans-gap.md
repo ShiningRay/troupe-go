@@ -1,7 +1,7 @@
 # Troupe.go 与 Orleans 10.0 的差距
 
 > 本文描述目标差距，不表示相关能力已实现。基线口径与
-> [troupe-planning Orleans 对标基线](https://github.com/ShiningRay/troupe-planning/blob/main/docs/orleans-baseline.md)
+> [troupe-planning Orleans 对标基线](https://github.com/ShiningRay/troupe/blob/main/docs/orleans-baseline.md)
 > 一致。
 
 | 能力域 | Orleans 基线 | Go 当前状态 | 计划入口 |

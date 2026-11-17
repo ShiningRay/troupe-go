@@ -13,7 +13,7 @@ UnknownOutcome / golden 向量对齐）。
 - [PLAN.md](PLAN.md)：分阶段方案（M0–M6）、验收门禁与风险对应。
 - [验证记录](docs/verification.md)：各里程碑实际命令与结果。
 - [Orleans 差距](docs/orleans-gap.md)
-- [多语言统一规划](https://github.com/ShiningRay/troupe-planning)
+- [多语言统一规划](https://github.com/ShiningRay/troupe)
 
 ## 验证
 
