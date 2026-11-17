@@ -1,0 +1,13 @@
+# Binaries / test artifacts
+*.exe
+*.test
+*.out
+coverage.*
+
+# Local dev databases
+*.db
+*.db-wal
+*.db-shm
+
+# Editor / OS
+.DS_Store

@@ -1,0 +1,1 @@
+{"protocol":"troupe-hash-crc32/1","algorithm":"CRC32 IEEE 802.3 (poly 0xEDB88320), init 0xFFFFFFFF, final xor 0xFFFFFFFF","cases":[{"key":"app/order/1","crc32":"93880cb0"},{"key":"shop/cart/cart-1","crc32":"6c1bb574"},{"key":"","crc32":"00000000"},{"key":"a","crc32":"e8b7be43"},{"key":"troupe/ro%2Fle/key","crc32":"09a65f03"},{"key":"ns/role/%252F","crc32":"67ebc50d"}]}

@@ -1,0 +1,1 @@
+{"protocol":"troupe-envelope/1","frame":"magic(TRP1 u32 LE) + length(u32 LE) + crc32(u32 LE) + payload(UTF-8 JSON)","limits":{"max_frame_default":1048576,"auth_first_frame":true},"sample_request":[{"t":"req","id":7,"actor":"app/order/1","m":"increment","a":{"by":1},"dl":1767225600000,"tp":"00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"}]}
