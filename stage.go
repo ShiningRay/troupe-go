@@ -393,6 +393,13 @@ func (s *Stage) Close() {
 	}
 }
 
+// Manual 返回是否为 Manual 调度（Rehearsal）——Runner/运维需自行 Pump。
+func (s *Stage) Manual() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mode == schedulerManual
+}
+
 func (s *Stage) Closed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

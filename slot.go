@@ -395,6 +395,17 @@ func (s *actorSlot) activate() (activation, error) {
 			journal[r.Key] = r
 		}
 	}
+	// outbox journal 激活时装载（未派发事件；Save 重提交，派发后 MarkSent）。
+	outboxJournal := make(map[string]OutboxRecord)
+	if os, ok := s.store.(OutboxStore); ok {
+		events, err := os.PollOutbox(s.baseCtx, s.id, 4096)
+		if err != nil {
+			return activation{}, err
+		}
+		for _, ev := range events {
+			outboxJournal[ev.EventID] = ev
+		}
+	}
 	actCtx := &ActivationContext{
 		store:         s.store,
 		schemaVersion: s.manifest.schemaVer(),
@@ -402,6 +413,7 @@ func (s *actorSlot) activate() (activation, error) {
 		Revision:      record.Revision,
 		clock:         s.clock,
 		journal:       journal,
+		outbox:        outboxJournal,
 		retention:     s.cfg.IdempotencyRetention,
 		storeCtx:      s.baseCtx,
 	}

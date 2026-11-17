@@ -2,6 +2,8 @@ package troupe
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,8 +12,9 @@ import (
 )
 
 // ActivationContext 一次激活的所有权与存储视图。Revision 由 Save 原子推进。
-// journal 为激活时装载的幂等记录（未过期）；storeCtx 为存储操作上下文
-// （随 Stage 生命周期取消，Close 后的存储调用快速失败）；Outbox journal 在 M3 扩展。
+// journal 为激活时装载的幂等记录（未过期）；outbox 为待提交外部副作用事件
+// （激活时装载未派发事件，Save 与 Props 同事务提交）；storeCtx 为存储操作上下文
+// （随 Stage 生命周期取消，Close 后的存储调用快速失败）。
 type ActivationContext struct {
 	store         PropStore
 	schemaVersion int
@@ -19,6 +22,7 @@ type ActivationContext struct {
 	Revision      uint64
 	clock         Clock
 	journal       map[string]IdempotencyRecord
+	outbox        map[string]OutboxRecord
 	retention     time.Duration
 	storeCtx      context.Context
 }
@@ -28,11 +32,26 @@ func (c *ActivationContext) StoreCtx() context.Context { return c.storeCtx }
 
 func (c *ActivationContext) Now() time.Time { return c.clock.Now() }
 
-// writeJournaled Props CAS 与幂等记录同事务提交；store 不支持 JournalingStore 时显式报错。
-func (c *ActivationContext) writeJournaled(id ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord) (PropRecord, error) {
+// commitAtomic Props CAS + 幂等 journal + outbox 同事务原子提交
+// （store 能力按需检测；失败显式报错，不做静默降级）。
+func (c *ActivationContext) commitAtomic(id ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord) (PropRecord, error) {
+	var outbox []OutboxRecord
+	for _, ev := range c.outbox {
+		outbox = append(outbox, ev)
+	}
+	if len(outbox) > 0 {
+		os, ok := c.store.(OutboxStore)
+		if !ok {
+			return PropRecord{}, &InvalidActorStateError{Detail: "存在未提交外部事件，但当前 PropStore 不支持 Outbox（需实现 OutboxStore）"}
+		}
+		return os.WriteWithOutbox(c.storeCtx, id, expectedRevision, schemaVersion, data, epoch, journal, outbox)
+	}
 	js, ok := c.store.(JournalingStore)
 	if !ok {
-		return PropRecord{}, &InvalidActorStateError{Detail: "当前 PropStore 不支持幂等 journal（需实现 JournalingStore）"}
+		if len(journal) > 0 {
+			return PropRecord{}, &InvalidActorStateError{Detail: "当前 PropStore 不支持幂等 journal（需实现 JournalingStore）"}
+		}
+		return c.store.Write(c.storeCtx, id, expectedRevision, schemaVersion, data, epoch)
 	}
 	return js.WriteJournaled(c.storeCtx, id, expectedRevision, schemaVersion, data, epoch, journal)
 }
@@ -68,19 +87,51 @@ func (a *Actor[P]) Props() *P { return &a.props }
 // SchemaVersion 返回 manifest 目标 schema 版本。
 func (a *Actor[P]) SchemaVersion() int { return a.actx.schemaVersion }
 
-// Save 显式持久化：以 expectedRevision + epoch 原子 CAS 提交当前 Props。
+// Save 显式持久化：以 expectedRevision + epoch 原子 CAS 提交当前 Props
+// （含待提交幂等记录与 outbox 事件——同事务原子提交）。
 // 失败（CAS 冲突 / fencing 拒绝）会使实例失效：后续调用从最后已提交快照重新激活。
 func (a *Actor[P]) Save() error {
 	data, err := json.Marshal(a.props)
 	if err != nil {
 		return &InvalidActorStateError{Detail: "props 序列化失败：" + err.Error()}
 	}
-	rec, err := a.actx.store.Write(a.actx.storeCtx, a.id, a.actx.Revision, a.actx.schemaVersion, string(data), a.actx.Epoch)
+	rec, err := a.actx.commitAtomic(a.id, a.actx.Revision, a.actx.schemaVersion, string(data), a.actx.Epoch, nil)
 	if err != nil {
 		return err
 	}
 	a.actx.Revision = rec.Revision
+	a.actx.outbox = make(map[string]OutboxRecord) // 事件已随 Props 落盘，交由 OutboxDispatcher 派发
 	return nil
+}
+
+// EmitEvent 外部副作用 Outbox（docs/outbox 指引）：事件记入 journal，
+// 下次 Save 与 Props 同原子提交；派发经 OutboxDispatcher 至少一次（接收方幂等）。
+// eventID 自动生成；store 不支持 Outbox 时立即报错（fail fast，不做静默丢失）。
+func (a *Actor[P]) EmitEvent(topic string, payload any) (string, error) {
+	if _, ok := a.actx.store.(OutboxStore); !ok {
+		return "", &InvalidActorStateError{Detail: "当前 PropStore 不支持 Outbox（需实现 OutboxStore）"}
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return "", &InvalidActorStateError{Detail: "事件载荷序列化失败：" + err.Error()}
+	}
+	id := newEventID()
+	if a.actx.outbox == nil {
+		a.actx.outbox = make(map[string]OutboxRecord)
+	}
+	a.actx.outbox[id] = OutboxRecord{
+		EventID: id, ActorID: a.id.Canonical(), Topic: topic,
+		Payload: b, CreatedAt: a.actx.clock.Now(),
+	}
+	return id, nil
+}
+
+func newEventID() string {
+	b := make([]byte, 16)
+	if _, err := crand.Read(b); err != nil {
+		panic(fmt.Sprintf("event id 生成失败：%v", err))
+	}
+	return hex.EncodeToString(b)
 }
 
 // OnStage / OffStage 默认空实现；具体 Actor 通过实现 StageHooks 覆盖。
@@ -132,7 +183,7 @@ func (a *Actor[P]) Idempotent(key, fingerprint string, fn func() (any, error)) (
 	if serr != nil {
 		return nil, &InvalidActorStateError{Detail: "props 序列化失败：" + serr.Error()}
 	}
-	rec, werr := ctx.writeJournaled(a.id, ctx.Revision, ctx.schemaVersion, string(data), ctx.Epoch, []IdempotencyRecord{record})
+	rec, werr := ctx.commitAtomic(a.id, ctx.Revision, ctx.schemaVersion, string(data), ctx.Epoch, []IdempotencyRecord{record})
 	if werr != nil {
 		return nil, werr
 	}

@@ -2,6 +2,7 @@ package troupe
 
 import (
 	"context"
+	"sort"
 	"sync"
 )
 
@@ -119,6 +120,8 @@ type MemoryPropStore struct {
 	mu        sync.Mutex
 	records   map[ActorID]PropRecord
 	journals  map[ActorID]map[string]IdempotencyRecord
+	outboxMap map[ActorID]map[string]OutboxRecord
+	sent      map[string]bool
 	ownership OwnershipStore
 }
 
@@ -126,6 +129,8 @@ func NewMemoryPropStore(ownership OwnershipStore) *MemoryPropStore {
 	return &MemoryPropStore{
 		records:   make(map[ActorID]PropRecord),
 		journals:  make(map[ActorID]map[string]IdempotencyRecord),
+		outboxMap: make(map[ActorID]map[string]OutboxRecord),
+		sent:      make(map[string]bool),
 		ownership: ownership,
 	}
 }
@@ -192,6 +197,11 @@ func (m *MemoryPropStore) assertFencing(ctx context.Context, actorID ActorID, ep
 
 // WriteJournaled 幂等 journal 与 Props 同锁原子提交（CAS/fencing 失败则 journal 不写）。
 func (m *MemoryPropStore) WriteJournaled(ctx context.Context, actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord) (PropRecord, error) {
+	return m.writeCommit(ctx, actorID, expectedRevision, schemaVersion, data, epoch, journal, nil)
+}
+
+// writeCommit Props + journal + outbox 同锁原子提交（CAS/fencing 失败整体不生效）。
+func (m *MemoryPropStore) writeCommit(ctx context.Context, actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord, outbox []OutboxRecord) (PropRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rec, ok := m.records[actorID]
@@ -214,7 +224,54 @@ func (m *MemoryPropStore) WriteJournaled(ctx context.Context, actorID ActorID, e
 	for _, entry := range journal {
 		jm[entry.Key] = entry
 	}
+	if len(outbox) > 0 {
+		om := m.outboxMap[actorID]
+		if om == nil {
+			om = make(map[string]OutboxRecord)
+			m.outboxMap[actorID] = om
+		}
+		for _, ev := range outbox {
+			om[ev.EventID] = ev
+		}
+	}
 	return updated, nil
+}
+
+// pollOutbox 未投递事件（派发器轮询；MarkSent 后不再返回）。
+func (m *MemoryPropStore) pollOutbox(ctx context.Context, actorID ActorID, limit int) []OutboxRecord {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	om := m.outboxMap[actorID]
+	if len(om) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(om))
+	for id := range om {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var out []OutboxRecord
+	for _, id := range ids {
+		if m.sent[actorID.Canonical()+"\x1f"+id] {
+			continue
+		}
+		out = append(out, om[id])
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// markSent 标记已投递（事件存在才标记成功）。
+func (m *MemoryPropStore) markSent(ctx context.Context, actorID ActorID, eventID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.outboxMap[actorID][eventID]; !ok {
+		return false
+	}
+	m.sent[actorID.Canonical()+"\x1f"+eventID] = true
+	return true
 }
 
 func (m *MemoryPropStore) LoadJournal(ctx context.Context, actorID ActorID, nowUnix int64) ([]IdempotencyRecord, error) {

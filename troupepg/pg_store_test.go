@@ -30,6 +30,9 @@ func openPair(t *testing.T, instance string) (*Store, *OwnershipStore) {
 	if err != nil {
 		t.Fatalf("Open(%s) 失败：%v", instance, err)
 	}
+	// 测试隔离：清空共享库中的上次运行残留（容器跨 go test 持久）
+	_, _ = store.pool.Exec(context.Background(),
+		`TRUNCATE troupe_props, troupe_ownership, troupe_journal, troupe_reminders, troupe_outbox, troupe_outbox_sent`)
 	t.Cleanup(store.Close)
 	return store, own
 }
