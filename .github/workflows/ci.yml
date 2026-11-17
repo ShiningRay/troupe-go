@@ -11,6 +11,25 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: troupe
+          POSTGRES_PASSWORD: troupe
+          POSTGRES_DB: troupe
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U troupe"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TROUPE_PG_URL: postgres://troupe:troupe@127.0.0.1:5432/troupe
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

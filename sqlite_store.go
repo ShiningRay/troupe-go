@@ -1,6 +1,7 @@
 package troupe
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -80,8 +81,8 @@ func (s *SQLitePropStore) CrossNodeSafe() bool { return false }
 
 func (s *SQLitePropStore) OwnershipStore() *SQLiteOwnershipStore { return s.ownership }
 
-func (s *SQLitePropStore) Read(actorID ActorID) (*PropRecord, error) {
-	row := s.db.QueryRow(
+func (s *SQLitePropStore) Read(ctx context.Context, actorID ActorID) (*PropRecord, error) {
+	row := s.db.QueryRowContext(ctx,
 		`SELECT revision, schema_version, data, epoch FROM troupe_props WHERE actor_id = ?`,
 		actorID.Canonical(),
 	)
@@ -96,20 +97,20 @@ func (s *SQLitePropStore) Read(actorID ActorID) (*PropRecord, error) {
 	return &rec, nil
 }
 
-func (s *SQLitePropStore) Create(actorID ActorID, schemaVersion int, data string, epoch uint64) (PropRecord, error) {
+func (s *SQLitePropStore) Create(ctx context.Context, actorID ActorID, schemaVersion int, data string, epoch uint64) (PropRecord, error) {
 	// 存在检查优先于 fencing（与 troupe.cr 顺序一致）。
 	var exists int
-	err := s.db.QueryRow(`SELECT 1 FROM troupe_props WHERE actor_id = ?`, actorID.Canonical()).Scan(&exists)
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM troupe_props WHERE actor_id = ?`, actorID.Canonical()).Scan(&exists)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return PropRecord{}, fmt.Errorf("SQLite create 检查失败：%w", err)
 	}
 	if exists == 1 {
 		return PropRecord{}, &ConflictError{Kind: ConflictExists, Actor: actorID.Canonical()}
 	}
-	if err := s.ownership.assertFencing(actorID, epoch); err != nil {
+	if err := s.ownership.assertFencing(ctx, actorID, epoch); err != nil {
 		return PropRecord{}, err
 	}
-	_, err = s.db.Exec(
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO troupe_props (actor_id, revision, schema_version, data, epoch) VALUES (?, 1, ?, ?, ?)`,
 		actorID.Canonical(), schemaVersion, data, epoch,
 	)
@@ -123,14 +124,14 @@ func (s *SQLitePropStore) Create(actorID ActorID, schemaVersion int, data string
 	return PropRecord{Revision: 1, SchemaVersion: schemaVersion, Data: data, Epoch: epoch}, nil
 }
 
-func (s *SQLitePropStore) Write(actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64) (PropRecord, error) {
-	return s.writeCore(actorID, expectedRevision, schemaVersion, data, epoch, nil)
+func (s *SQLitePropStore) Write(ctx context.Context, actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64) (PropRecord, error) {
+	return s.writeCore(ctx, actorID, expectedRevision, schemaVersion, data, epoch, nil)
 }
 
 // writeCore 单条 UPDATE 原子 CAS+fencing（WHERE 内同时校验 revision 与当前 epoch），
 // journal 非空时同事务 upsert（CAS 失败整体不生效）。
-func (s *SQLitePropStore) writeCore(actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord) (PropRecord, error) {
-	tx, err := s.db.Begin()
+func (s *SQLitePropStore) writeCore(ctx context.Context, actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord) (PropRecord, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return PropRecord{}, fmt.Errorf("SQLite 事务失败：%w", err)
 	}
@@ -190,11 +191,11 @@ func (s *SQLitePropStore) writeCore(actorID ActorID, expectedRevision uint64, sc
 	return PropRecord{Revision: expectedRevision + 1, SchemaVersion: schemaVersion, Data: data, Epoch: epoch}, nil
 }
 
-func (s *SQLitePropStore) WriteJournaled(actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord) (PropRecord, error) {
-	return s.writeCore(actorID, expectedRevision, schemaVersion, data, epoch, journal)
+func (s *SQLitePropStore) WriteJournaled(ctx context.Context, actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord) (PropRecord, error) {
+	return s.writeCore(ctx, actorID, expectedRevision, schemaVersion, data, epoch, journal)
 }
 
-func (s *SQLitePropStore) LoadJournal(actorID ActorID, nowUnix int64) ([]IdempotencyRecord, error) {
+func (s *SQLitePropStore) LoadJournal(ctx context.Context, actorID ActorID, nowUnix int64) ([]IdempotencyRecord, error) {
 	rows, err := s.db.Query(
 		`SELECT key, fingerprint, ok, value, error_class, error_message, expires_at
 		 FROM troupe_journal WHERE actor_id = ? AND expires_at > ?`,
@@ -216,9 +217,9 @@ func (s *SQLitePropStore) LoadJournal(actorID ActorID, nowUnix int64) ([]Idempot
 }
 
 // Acquire 取得下一个单调 epoch（upsert + RETURNING 单语句）。
-func (o *SQLiteOwnershipStore) Acquire(actorID ActorID) uint64 {
+func (o *SQLiteOwnershipStore) Acquire(ctx context.Context, actorID ActorID) (uint64, error) {
 	var epoch uint64
-	err := o.db.QueryRow(
+	err := o.db.QueryRowContext(ctx,
 		`INSERT INTO troupe_ownership (actor_id, epoch) VALUES (?, 1)
 		 ON CONFLICT(actor_id) DO UPDATE SET epoch = troupe_ownership.epoch + 1
 		 RETURNING epoch`,
@@ -226,24 +227,24 @@ func (o *SQLiteOwnershipStore) Acquire(actorID ActorID) uint64 {
 	).Scan(&epoch)
 	if err != nil {
 		// 兼容无 RETURNING 的构建：退化为查询+更新（单连接内安全）。
-		_ = o.db.QueryRow(`SELECT epoch FROM troupe_ownership WHERE actor_id = ?`, actorID.Canonical()).Scan(&epoch)
+		_ = o.db.QueryRowContext(ctx, `SELECT epoch FROM troupe_ownership WHERE actor_id = ?`, actorID.Canonical()).Scan(&epoch)
 		epoch++
-		_, _ = o.db.Exec(`UPDATE troupe_ownership SET epoch = ? WHERE actor_id = ?`, epoch, actorID.Canonical())
+		_, _ = o.db.ExecContext(ctx, `UPDATE troupe_ownership SET epoch = ? WHERE actor_id = ?`, epoch, actorID.Canonical())
 	}
-	return epoch
+	return epoch, nil
 }
 
-func (o *SQLiteOwnershipStore) Current(actorID ActorID) uint64 {
+func (o *SQLiteOwnershipStore) Current(ctx context.Context, actorID ActorID) uint64 {
 	var epoch uint64
-	err := o.db.QueryRow(`SELECT epoch FROM troupe_ownership WHERE actor_id = ?`, actorID.Canonical()).Scan(&epoch)
+	err := o.db.QueryRowContext(ctx, `SELECT epoch FROM troupe_ownership WHERE actor_id = ?`, actorID.Canonical()).Scan(&epoch)
 	if err != nil {
 		return 0
 	}
 	return epoch
 }
 
-func (o *SQLiteOwnershipStore) Renew(actorID ActorID, epoch uint64) bool {
-	res, err := o.db.Exec(
+func (o *SQLiteOwnershipStore) Renew(ctx context.Context, actorID ActorID, epoch uint64) bool {
+	res, err := o.db.ExecContext(ctx,
 		`UPDATE troupe_ownership SET epoch = epoch WHERE actor_id = ? AND epoch = ?`,
 		actorID.Canonical(), epoch,
 	)
@@ -254,8 +255,8 @@ func (o *SQLiteOwnershipStore) Renew(actorID ActorID, epoch uint64) bool {
 	return n == 1
 }
 
-func (o *SQLiteOwnershipStore) assertFencing(actorID ActorID, epoch uint64) error {
-	current := o.Current(actorID)
+func (o *SQLiteOwnershipStore) assertFencing(ctx context.Context, actorID ActorID, epoch uint64) error {
+	current := o.Current(ctx, actorID)
 	if current != epoch {
 		return &CallRejectedError{
 			Reason:    RejectOwnership,

@@ -1,6 +1,7 @@
 package troupe
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +10,8 @@ import (
 )
 
 // ActivationContext 一次激活的所有权与存储视图。Revision 由 Save 原子推进。
-// journal 为激活时装载的幂等记录（未过期）；Outbox journal 在 M3 扩展。
+// journal 为激活时装载的幂等记录（未过期）；storeCtx 为存储操作上下文
+// （随 Stage 生命周期取消，Close 后的存储调用快速失败）；Outbox journal 在 M3 扩展。
 type ActivationContext struct {
 	store         PropStore
 	schemaVersion int
@@ -18,7 +20,11 @@ type ActivationContext struct {
 	clock         Clock
 	journal       map[string]IdempotencyRecord
 	retention     time.Duration
+	storeCtx      context.Context
 }
+
+// StoreCtx 返回存储操作上下文（随 Stage 生命周期取消）。
+func (c *ActivationContext) StoreCtx() context.Context { return c.storeCtx }
 
 func (c *ActivationContext) Now() time.Time { return c.clock.Now() }
 
@@ -28,7 +34,7 @@ func (c *ActivationContext) writeJournaled(id ActorID, expectedRevision uint64, 
 	if !ok {
 		return PropRecord{}, &InvalidActorStateError{Detail: "当前 PropStore 不支持幂等 journal（需实现 JournalingStore）"}
 	}
-	return js.WriteJournaled(id, expectedRevision, schemaVersion, data, epoch, journal)
+	return js.WriteJournaled(c.storeCtx, id, expectedRevision, schemaVersion, data, epoch, journal)
 }
 
 // Props 是可恢复状态的契约标记：必须是纯数据 DTO（encoding/json 可往返），
@@ -69,7 +75,7 @@ func (a *Actor[P]) Save() error {
 	if err != nil {
 		return &InvalidActorStateError{Detail: "props 序列化失败：" + err.Error()}
 	}
-	rec, err := a.actx.store.Write(a.id, a.actx.Revision, a.actx.schemaVersion, string(data), a.actx.Epoch)
+	rec, err := a.actx.store.Write(a.actx.storeCtx, a.id, a.actx.Revision, a.actx.schemaVersion, string(data), a.actx.Epoch)
 	if err != nil {
 		return err
 	}

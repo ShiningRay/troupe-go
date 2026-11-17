@@ -1,17 +1,21 @@
 package troupe
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
+
+// ctxbg 测试共享的存储调用上下文（Memory/SQLite Provider 不感知取消）。
+var ctxbg = context.Background()
 
 func TestMemoryStoreCreateReadRoundTrip(t *testing.T) {
 	ownership := NewMemoryOwnershipStore()
 	store := NewMemoryPropStore(ownership)
 	id := MustActorID("app", "cart", "1")
-	epoch := ownership.Acquire(id)
+	epoch, _ := ownership.Acquire(ctxbg, id)
 
-	rec, err := store.Create(id, 1, `{"items":["a"]}`, epoch)
+	rec, err := store.Create(ctxbg, id, 1, `{"items":["a"]}`, epoch)
 	if err != nil {
 		t.Fatalf("Create 失败：%v", err)
 	}
@@ -19,7 +23,7 @@ func TestMemoryStoreCreateReadRoundTrip(t *testing.T) {
 		t.Fatalf("首条记录 revision/schema = %d/%d, want 1/1", rec.Revision, rec.SchemaVersion)
 	}
 
-	got, err := store.Read(id)
+	got, err := store.Read(ctxbg, id)
 	if err != nil || got == nil {
 		t.Fatalf("Read 失败：%v", err)
 	}
@@ -29,7 +33,7 @@ func TestMemoryStoreCreateReadRoundTrip(t *testing.T) {
 
 	// read 隔离：修改返回副本不落入存储
 	got.Data = "mutated"
-	again, _ := store.Read(id)
+	again, _ := store.Read(ctxbg, id)
 	if again.Data != `{"items":["a"]}` {
 		t.Fatalf("read 快照被外部修改污染：%q", again.Data)
 	}
@@ -39,12 +43,12 @@ func TestMemoryStoreCreateExistsConflict(t *testing.T) {
 	ownership := NewMemoryOwnershipStore()
 	store := NewMemoryPropStore(ownership)
 	id := MustActorID("app", "cart", "1")
-	epoch := ownership.Acquire(id)
+	epoch, _ := ownership.Acquire(ctxbg, id)
 
-	if _, err := store.Create(id, 1, `{}`, epoch); err != nil {
+	if _, err := store.Create(ctxbg, id, 1, `{}`, epoch); err != nil {
 		t.Fatalf("首次 Create 失败：%v", err)
 	}
-	_, err := store.Create(id, 1, `{}`, epoch)
+	_, err := store.Create(ctxbg, id, 1, `{}`, epoch)
 	var ce *ConflictError
 	if !errors.As(err, &ce) || ce.Kind != ConflictExists {
 		t.Fatalf("重复 Create 错误 = %v, want ConflictError{exists}", err)
@@ -55,18 +59,18 @@ func TestMemoryStoreWriteCAS(t *testing.T) {
 	ownership := NewMemoryOwnershipStore()
 	store := NewMemoryPropStore(ownership)
 	id := MustActorID("app", "cart", "1")
-	epoch := ownership.Acquire(id)
-	store.Create(id, 1, `{"n":1}`, epoch)
+	epoch, _ := ownership.Acquire(ctxbg, id)
+	store.Create(ctxbg, id, 1, `{"n":1}`, epoch)
 
 	// 期望 revision 不符 → ConflictError{revision}
-	_, err := store.Write(id, 99, 1, `{"n":2}`, epoch)
+	_, err := store.Write(ctxbg, id, 99, 1, `{"n":2}`, epoch)
 	var ce *ConflictError
 	if !errors.As(err, &ce) || ce.Kind != ConflictRevision {
 		t.Fatalf("CAS 冲突错误 = %v, want ConflictError{revision}", err)
 	}
 
 	// 正确 revision → 写入成功且 revision 前进
-	rec, err := store.Write(id, 1, 1, `{"n":2}`, epoch)
+	rec, err := store.Write(ctxbg, id, 1, 1, `{"n":2}`, epoch)
 	if err != nil {
 		t.Fatalf("Write 失败：%v", err)
 	}
@@ -75,7 +79,7 @@ func TestMemoryStoreWriteCAS(t *testing.T) {
 	}
 
 	// 不存在的 actor → ConflictError{revision}（troupe.cr 语义）
-	_, err = store.Write(MustActorID("app", "cart", "ghost"), 1, 1, `{}`, epoch)
+	_, err = store.Write(ctxbg, MustActorID("app", "cart", "ghost"), 1, 1, `{}`, epoch)
 	if !errors.As(err, &ce) || ce.Kind != ConflictRevision {
 		t.Fatalf("缺记录 Write 错误 = %v, want ConflictError{revision}", err)
 	}
@@ -85,17 +89,17 @@ func TestMemoryStoreFencingRejectsStaleEpoch(t *testing.T) {
 	ownership := NewMemoryOwnershipStore()
 	store := NewMemoryPropStore(ownership)
 	id := MustActorID("app", "cart", "1")
-	first := ownership.Acquire(id)
-	store.Create(id, 1, `{}`, first)
+	first, _ := ownership.Acquire(ctxbg, id)
+	store.Create(ctxbg, id, 1, `{}`, first)
 
 	// 模拟接管：新 epoch 取得所有权
-	second := ownership.Acquire(id)
+	second, _ := ownership.Acquire(ctxbg, id)
 	if second <= first {
 		t.Fatalf("epoch 必须单调递增：%d → %d", first, second)
 	}
 
 	// 旧 epoch 写即使 revision 匹配也拒绝（fencing 优先于 CAS）
-	_, err := store.Write(id, 1, 1, `{"stale":true}`, first)
+	_, err := store.Write(ctxbg, id, 1, 1, `{"stale":true}`, first)
 	var cre *CallRejectedError
 	if !errors.As(err, &cre) || cre.Reason != RejectOwnership || cre.Retryable {
 		t.Fatalf("旧 epoch 写错误 = %v, want CallRejectedError{ownership, retryable=false}", err)
@@ -106,15 +110,15 @@ func TestMemoryStoreFencingRejectsStaleEpoch(t *testing.T) {
 	ownership2 := NewMemoryOwnershipStore()
 	store2 := NewMemoryPropStore(ownership2)
 	id2 := MustActorID("app", "cart", "2")
-	e1 := ownership2.Acquire(id2)
-	_ = ownership2.Acquire(id2) // epoch 2 取代
-	_, err = store2.Create(id2, 1, `{}`, e1)
+	e1, _ := ownership2.Acquire(ctxbg, id2)
+	_, _ = ownership2.Acquire(ctxbg, id2) // epoch 2 取代
+	_, err = store2.Create(ctxbg, id2, 1, `{}`, e1)
 	if !errors.As(err, &cre) || cre.Reason != RejectOwnership {
 		t.Fatalf("旧 epoch create 错误 = %v, want CallRejectedError{ownership}", err)
 	}
 
 	// 新 epoch 写成功
-	if _, err := store.Write(id, 1, 1, `{"fresh":true}`, second); err != nil {
+	if _, err := store.Write(ctxbg, id, 1, 1, `{"fresh":true}`, second); err != nil {
 		t.Fatalf("新 epoch Write 失败：%v", err)
 	}
 }
@@ -129,11 +133,11 @@ func TestMemoryStoreCrossNodeUnsafe(t *testing.T) {
 func TestOwnershipRenew(t *testing.T) {
 	o := NewMemoryOwnershipStore()
 	id := MustActorID("app", "cart", "1")
-	e := o.Acquire(id)
-	if !o.Renew(id, e) {
+	e, _ := o.Acquire(ctxbg, id)
+	if !o.Renew(ctxbg, id, e) {
 		t.Fatal("同 epoch renew 应成功")
 	}
-	if o.Renew(id, e-1) {
+	if o.Renew(ctxbg, id, e-1) {
 		t.Fatal("旧 epoch renew 应失败")
 	}
 }

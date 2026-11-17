@@ -117,7 +117,7 @@ func TestRehearsalAwaitEscapeOnCtxCancel(t *testing.T) {
 	}
 	// 之后 pump 正常执行，效果照常提交（放弃等待 ≠ 取消执行）
 	r.PumpAll()
-	rec, _ := r.Store.Read(r.Actor("cart", "e"))
+	rec, _ := r.Store.Read(ctxbg, r.Actor("cart", "e"))
 	if rec == nil {
 		t.Fatal("pump 后应正常激活提交")
 	}

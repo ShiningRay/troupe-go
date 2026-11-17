@@ -1,6 +1,9 @@
 package troupe
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 // 错误子分类常量（跨线码表见 errors.go；这些值是 golden/errors.json
 // 的结构化字段值，不可随意改动）。
@@ -34,14 +37,16 @@ type PropRecord struct {
 }
 
 // OwnershipStore 为每个 ActorId 发放单调递增 epoch（fencing token）。
+// 跨节点 Provider（PostgreSQL）的 Acquire 可能因租期冲突失败——返回错误
+// 由激活路径统一包装为 ActivationError（槽位回 Idle 可重试）。
 type OwnershipStore interface {
-	// Acquire 取得下一个 epoch（激活时调用；跨节点 Provider 的租期语义在 M3 扩展）。
-	Acquire(actorID ActorID) uint64
-	// Current 返回该 ActorId 当前有效 epoch。
-	Current(actorID ActorID) uint64
+	// Acquire 取得下一个 epoch（激活时调用；跨节点 Provider 带租期守卫）。
+	Acquire(ctx context.Context, actorID ActorID) (uint64, error)
+	// Current 返回该 ActorId 当前有效 epoch（无记录为 0）。
+	Current(ctx context.Context, actorID ActorID) uint64
 	// Renew 同 epoch 续租（跨节点 Provider 的 lease 语义；单节点 Provider 恒持有时
 	// 返回 true，epoch 已被取代返回 false）。
-	Renew(actorID ActorID, epoch uint64) bool
+	Renew(ctx context.Context, actorID ActorID, epoch uint64) bool
 }
 
 // MemoryOwnershipStore 单机内存所有权：acquire 单调递增。
@@ -54,20 +59,20 @@ func NewMemoryOwnershipStore() *MemoryOwnershipStore {
 	return &MemoryOwnershipStore{epochs: make(map[ActorID]uint64)}
 }
 
-func (m *MemoryOwnershipStore) Acquire(actorID ActorID) uint64 {
+func (m *MemoryOwnershipStore) Acquire(ctx context.Context, actorID ActorID) (uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.epochs[actorID]++
-	return m.epochs[actorID]
+	return m.epochs[actorID], nil
 }
 
-func (m *MemoryOwnershipStore) Current(actorID ActorID) uint64 {
+func (m *MemoryOwnershipStore) Current(ctx context.Context, actorID ActorID) uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.epochs[actorID]
 }
 
-func (m *MemoryOwnershipStore) Renew(actorID ActorID, epoch uint64) bool {
+func (m *MemoryOwnershipStore) Renew(ctx context.Context, actorID ActorID, epoch uint64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.epochs[actorID] == epoch
@@ -88,9 +93,9 @@ type IdempotencyRecord struct {
 // WriteJournaled 把 Props CAS 与幂等记录在同一次原子提交内落盘（失败则两者都不生效）。
 type JournalingStore interface {
 	PropStore
-	WriteJournaled(actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord) (PropRecord, error)
+	WriteJournaled(ctx context.Context, actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord) (PropRecord, error)
 	// LoadJournal 返回未过期的幂等记录（激活时装载）。
-	LoadJournal(actorID ActorID, nowUnix int64) ([]IdempotencyRecord, error)
+	LoadJournal(ctx context.Context, actorID ActorID, nowUnix int64) ([]IdempotencyRecord, error)
 }
 
 // PropStore 契约（DESIGN §7）：
@@ -103,9 +108,9 @@ type JournalingStore interface {
 type PropStore interface {
 	CrossNodeSafe() bool
 	// Read 返回当前记录；不存在返回 (nil, nil)。
-	Read(actorID ActorID) (*PropRecord, error)
-	Create(actorID ActorID, schemaVersion int, data string, epoch uint64) (PropRecord, error)
-	Write(actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64) (PropRecord, error)
+	Read(ctx context.Context, actorID ActorID) (*PropRecord, error)
+	Create(ctx context.Context, actorID ActorID, schemaVersion int, data string, epoch uint64) (PropRecord, error)
+	Write(ctx context.Context, actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64) (PropRecord, error)
 }
 
 // MemoryPropStore Rehearsal/单机用：模拟 CAS 与 fencing；
@@ -127,7 +132,7 @@ func NewMemoryPropStore(ownership OwnershipStore) *MemoryPropStore {
 
 func (m *MemoryPropStore) CrossNodeSafe() bool { return false }
 
-func (m *MemoryPropStore) Read(actorID ActorID) (*PropRecord, error) {
+func (m *MemoryPropStore) Read(ctx context.Context, actorID ActorID) (*PropRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if rec, ok := m.records[actorID]; ok {
@@ -137,7 +142,7 @@ func (m *MemoryPropStore) Read(actorID ActorID) (*PropRecord, error) {
 	return nil, nil
 }
 
-func (m *MemoryPropStore) Create(actorID ActorID, schemaVersion int, data string, epoch uint64) (PropRecord, error) {
+func (m *MemoryPropStore) Create(ctx context.Context, actorID ActorID, schemaVersion int, data string, epoch uint64) (PropRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.records[actorID]; ok {
@@ -146,7 +151,7 @@ func (m *MemoryPropStore) Create(actorID ActorID, schemaVersion int, data string
 			// 与 troupe.cr 一致的消息结构；Detail 由 Error() 拼接。
 		}
 	}
-	if err := m.assertFencing(actorID, epoch); err != nil {
+	if err := m.assertFencing(ctx, actorID, epoch); err != nil {
 		return PropRecord{}, err
 	}
 	rec := PropRecord{Revision: 1, SchemaVersion: schemaVersion, Data: data, Epoch: epoch}
@@ -154,7 +159,7 @@ func (m *MemoryPropStore) Create(actorID ActorID, schemaVersion int, data string
 	return rec, nil
 }
 
-func (m *MemoryPropStore) Write(actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64) (PropRecord, error) {
+func (m *MemoryPropStore) Write(ctx context.Context, actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64) (PropRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rec, ok := m.records[actorID]
@@ -163,7 +168,7 @@ func (m *MemoryPropStore) Write(actorID ActorID, expectedRevision uint64, schema
 	}
 	// fencing 优先于 CAS：旧 epoch 一律拒绝，即使 revision 恰好匹配
 	// （旧 epoch 的 create/write/migrate 必须失败）。
-	if err := m.assertFencing(actorID, epoch); err != nil {
+	if err := m.assertFencing(ctx, actorID, epoch); err != nil {
 		return PropRecord{}, err
 	}
 	if rec.Revision != expectedRevision {
@@ -174,8 +179,8 @@ func (m *MemoryPropStore) Write(actorID ActorID, expectedRevision uint64, schema
 	return updated, nil
 }
 
-func (m *MemoryPropStore) assertFencing(actorID ActorID, epoch uint64) error {
-	current := m.ownership.Current(actorID)
+func (m *MemoryPropStore) assertFencing(ctx context.Context, actorID ActorID, epoch uint64) error {
+	current := m.ownership.Current(ctx, actorID)
 	if current != epoch {
 		return &CallRejectedError{
 			Reason:    RejectOwnership,
@@ -186,14 +191,14 @@ func (m *MemoryPropStore) assertFencing(actorID ActorID, epoch uint64) error {
 }
 
 // WriteJournaled 幂等 journal 与 Props 同锁原子提交（CAS/fencing 失败则 journal 不写）。
-func (m *MemoryPropStore) WriteJournaled(actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord) (PropRecord, error) {
+func (m *MemoryPropStore) WriteJournaled(ctx context.Context, actorID ActorID, expectedRevision uint64, schemaVersion int, data string, epoch uint64, journal []IdempotencyRecord) (PropRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rec, ok := m.records[actorID]
 	if !ok {
 		return PropRecord{}, &ConflictError{Kind: ConflictRevision, Actor: actorID.Canonical()}
 	}
-	if err := m.assertFencing(actorID, epoch); err != nil {
+	if err := m.assertFencing(ctx, actorID, epoch); err != nil {
 		return PropRecord{}, err
 	}
 	if rec.Revision != expectedRevision {
@@ -212,7 +217,7 @@ func (m *MemoryPropStore) WriteJournaled(actorID ActorID, expectedRevision uint6
 	return updated, nil
 }
 
-func (m *MemoryPropStore) LoadJournal(actorID ActorID, nowUnix int64) ([]IdempotencyRecord, error) {
+func (m *MemoryPropStore) LoadJournal(ctx context.Context, actorID ActorID, nowUnix int64) ([]IdempotencyRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	jm := m.journals[actorID]

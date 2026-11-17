@@ -33,7 +33,7 @@ func TestCallBasicsLive(t *testing.T) {
 	}
 
 	// 持久化读回：create(rev1) + save(rev2)
-	rec, _ := stage.Store().Read(id)
+	rec, _ := stage.Store().Read(ctxbg, id)
 	if rec == nil || rec.Revision != 2 {
 		t.Fatalf("store 记录 revision = %d, want 2（create+save）", rec.Revision)
 	}
@@ -67,7 +67,7 @@ func TestUnknownRoleAndWhitelist(t *testing.T) {
 	if _, err = stage.Call(context.Background(), MustActorID("app", "cart", "c1"), "add", map[string]any{"item": 42}); err == nil {
 		t.Fatal("类型不符应拒绝")
 	}
-	rec, _ := stage.Store().Read(MustActorID("app", "cart", "c1"))
+	rec, _ := stage.Store().Read(ctxbg, MustActorID("app", "cart", "c1"))
 	if rec != nil {
 		t.Fatalf("排队前拒绝不应创建 Props：%+v", rec)
 	}
@@ -126,7 +126,7 @@ func TestConcurrentFirstCallActivatesOnce(t *testing.T) {
 	if activations != 1 {
 		t.Fatalf("激活次数 = %d, want 1（single-flight）", activations)
 	}
-	rec, _ := stage.Store().Read(id)
+	rec, _ := stage.Store().Read(ctxbg, id)
 	if rec == nil || rec.Revision != n+1 {
 		t.Fatalf("revision = %d, want %d（create + 每个写 Turn 各提交一次）", rec.Revision, n+1)
 	}
@@ -191,7 +191,7 @@ func TestStrictSerialTurns(t *testing.T) {
 	if len(items) != n {
 		t.Fatalf("items 数量 = %d, want %d（strict 串行：无丢失更新）", len(items), n)
 	}
-	rec, _ := stage.Store().Read(id)
+	rec, _ := stage.Store().Read(ctxbg, id)
 	if rec.Revision != n+1 {
 		t.Fatalf("revision = %d, want %d（create + n 次保存）", rec.Revision, n+1)
 	}
@@ -283,7 +283,7 @@ func TestExecutionTimeoutUnknownOutcome(t *testing.T) {
 	m.Turn(Turn("quick", func(a *struct{ *Actor[slowProps] }, ctx *CallContext, _ Empty) (bool, error) {
 		// 只有在 long 的效果已提交后才应执行（执行占用不放行旧 Turn）；
 		// 快照读 store 验证 long 已提交。
-		rec, _ := a.actx.store.Read(a.ID())
+		rec, _ := a.actx.store.Read(a.actx.storeCtx, a.ID())
 		return rec != nil && strings.Contains(rec.Data, "true"), nil
 	}))
 	if err := m.Register(stage); err != nil {
@@ -325,7 +325,7 @@ func TestExecutionTimeoutUnknownOutcome(t *testing.T) {
 	}
 
 	// 效果已提交（结果未知 ≠ 效果未知）
-	rec, _ := stage.Store().Read(id)
+	rec, _ := stage.Store().Read(ctxbg, id)
 	if rec == nil || !strings.Contains(rec.Data, "true") {
 		t.Fatalf("long 效果未提交：%+v", rec)
 	}
@@ -355,8 +355,8 @@ func TestSaveConflictInvalidatesAndReactivates(t *testing.T) {
 	}
 
 	// 外部并发写者：直接经 store 用当前 revision 提交（模拟另一激活/节点）
-	rec, _ := r.Store.Read(id)
-	if _, err := r.Store.Write(id, rec.Revision, 1, `{"items":["external"]}`, r.Ownership.Current(id)); err != nil {
+	rec, _ := r.Store.Read(ctxbg, id)
+	if _, err := r.Store.Write(ctxbg, id, rec.Revision, 1, `{"items":["external"]}`, r.Ownership.Current(ctxbg, id)); err != nil {
 		t.Fatalf("外部写失败：%v", err)
 	}
 
@@ -391,8 +391,8 @@ func TestSaveConflictInvalidatesAndReactivates(t *testing.T) {
 
 func seedV1(t *testing.T, r *Rehearsal, id ActorID, data string) uint64 {
 	t.Helper()
-	epoch := r.Ownership.Acquire(id)
-	if _, err := r.Store.Create(id, 1, data, epoch); err != nil {
+	epoch, _ := r.Ownership.Acquire(ctxbg, id)
+	if _, err := r.Store.Create(ctxbg, id, 1, data, epoch); err != nil {
 		t.Fatalf("种子 v1 数据失败：%v", err)
 	}
 	return epoch
@@ -422,7 +422,7 @@ func TestMigrationChainV1ToV3(t *testing.T) {
 	if got["name"] != "legacy" || got["extra"] != "base" {
 		t.Fatalf("迁移后状态不符：%v", got)
 	}
-	rec, _ := r.Store.Read(id)
+	rec, _ := r.Store.Read(ctxbg, id)
 	if rec.SchemaVersion != 3 {
 		t.Fatalf("schema = %d, want 3", rec.SchemaVersion)
 	}
@@ -460,7 +460,7 @@ func TestMigrationFailureNoWrite(t *testing.T) {
 		t.Fatalf("错误未指明迁移步骤：%v", err)
 	}
 	// 失败不写：记录仍是 v1 原始数据
-	rec, _ := r.Store.Read(id)
+	rec, _ := r.Store.Read(ctxbg, id)
 	if rec.SchemaVersion != 1 || rec.Data != `{"name":"legacy"}` {
 		t.Fatalf("迁移失败产生了写入：%+v", rec)
 	}

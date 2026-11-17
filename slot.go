@@ -1,6 +1,7 @@
 package troupe
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -114,10 +115,13 @@ type actorSlot struct {
 	exited       chan struct{} // live 模式：消费者 goroutine 退出时关闭（泄漏断言用）
 
 	emitTraceFn func(TraceEvent)
+
+	baseCtx context.Context // Stage 生命周期上下文：存储操作与激活共用，Close 后取消
 }
 
 func newActorSlot(id ActorID, m manifestBase, store PropStore, ownership OwnershipStore,
-	clock Clock, cfg StageConfig, mode schedulerMode, emit func(StageEvent), emitTrace func(TraceEvent)) *actorSlot {
+	clock Clock, cfg StageConfig, mode schedulerMode, emit func(StageEvent), emitTrace func(TraceEvent),
+	baseCtx context.Context) *actorSlot {
 	s := &actorSlot{
 		id:           id,
 		manifest:     m,
@@ -128,6 +132,7 @@ func newActorSlot(id ActorID, m manifestBase, store PropStore, ownership Ownersh
 		live:         mode == schedulerLive,
 		emitFn:       emit,
 		emitTraceFn:  emitTrace,
+		baseCtx:      baseCtx,
 		wakeup:       make(chan struct{}, 1),
 		lastActivity: clock.Now(),
 		exited:       make(chan struct{}),
@@ -349,9 +354,13 @@ func (s *actorSlot) ensureActivated() (activation, error) {
 }
 
 // activate 激活顺序（不可颠倒）：acquire epoch → read/create → 逐级迁移 → parse → hooks。
+// 存储操作使用 Stage 生命周期上下文（Close 后快速失败，不悬挂 goroutine）。
 func (s *actorSlot) activate() (activation, error) {
-	epoch := s.ownership.Acquire(s.id)
-	record, err := s.store.Read(s.id)
+	epoch, err := s.ownership.Acquire(s.baseCtx, s.id)
+	if err != nil {
+		return activation{}, err // 租期冲突等 ownership 拒绝原样上抛（槽位回 Idle 可重试）
+	}
+	record, err := s.store.Read(s.baseCtx, s.id)
 	if err != nil {
 		return activation{}, err
 	}
@@ -360,7 +369,7 @@ func (s *actorSlot) activate() (activation, error) {
 		if err != nil {
 			return activation{}, err
 		}
-		rec, err := s.store.Create(s.id, s.manifest.schemaVer(), initial, epoch)
+		rec, err := s.store.Create(s.baseCtx, s.id, s.manifest.schemaVer(), initial, epoch)
 		if err != nil {
 			return activation{}, err
 		}
@@ -378,7 +387,7 @@ func (s *actorSlot) activate() (activation, error) {
 	// 幂等 journal 激活时装载（未过期记录；过期条目按新操作处理）。
 	journal := make(map[string]IdempotencyRecord)
 	if js, ok := s.store.(JournalingStore); ok {
-		records, err := js.LoadJournal(s.id, s.clock.Now().Unix())
+		records, err := js.LoadJournal(s.baseCtx, s.id, s.clock.Now().Unix())
 		if err != nil {
 			return activation{}, err
 		}
@@ -386,7 +395,7 @@ func (s *actorSlot) activate() (activation, error) {
 			journal[r.Key] = r
 		}
 	}
-	ctx := &ActivationContext{
+	actCtx := &ActivationContext{
 		store:         s.store,
 		schemaVersion: s.manifest.schemaVer(),
 		Epoch:         epoch,
@@ -394,8 +403,9 @@ func (s *actorSlot) activate() (activation, error) {
 		clock:         s.clock,
 		journal:       journal,
 		retention:     s.cfg.IdempotencyRetention,
+		storeCtx:      s.baseCtx,
 	}
-	act, err := s.manifest.buildActor(s.id, props, ctx)
+	act, err := s.manifest.buildActor(s.id, props, actCtx)
 	if err != nil {
 		return activation{}, err
 	}
@@ -427,7 +437,7 @@ func (s *actorSlot) migrateIfNeeded(record *PropRecord, epoch uint64) (*PropReco
 		}
 		data = out
 	}
-	updated, err := s.store.Write(s.id, record.Revision, s.manifest.schemaVer(), data, epoch)
+	updated, err := s.store.Write(s.baseCtx, s.id, record.Revision, s.manifest.schemaVer(), data, epoch)
 	if err != nil {
 		return nil, &ActivationError{Detail: "迁移提交失败：" + err.Error(), Cause: err}
 	}

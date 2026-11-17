@@ -66,7 +66,10 @@ type Stage struct {
 	cfg       StageConfig
 	name      string
 
-	mu         sync.Mutex
+	mu sync.Mutex
+
+	baseCtx    context.Context // Stage 生命周期上下文（存储操作/激活共用；Close 取消）
+	cancelCtx  context.CancelFunc
 	repertoire map[string]manifestBase
 	slots      map[ActorID]*actorSlot
 	callSeq    uint64
@@ -103,6 +106,7 @@ func NewStage(opts ...StageOption) *Stage {
 		slots:      make(map[ActorID]*actorSlot),
 		metrics:    newStageMetrics(),
 	}
+	s.baseCtx, s.cancelCtx = context.WithCancel(context.Background())
 	ownership := NewMemoryOwnershipStore()
 	s.ownership = ownership
 	s.store = NewMemoryPropStore(ownership)
@@ -280,7 +284,7 @@ func (s *Stage) prepareCall(id ActorID, method string, rawArgs json.RawMessage, 
 				Detail: fmt.Sprintf("Stage activation 数 %d 达上限 %d", len(s.slots), s.cfg.MaxActivations),
 			}
 		}
-		slot = newActorSlot(id, manifest, s.store, s.ownership, s.clock, s.cfg, s.mode, s.emit, s.emitTrace)
+		slot = newActorSlot(id, manifest, s.store, s.ownership, s.clock, s.cfg, s.mode, s.emit, s.emitTrace, s.baseCtx)
 		s.slots[id] = slot
 	}
 	return env, slot, nil
