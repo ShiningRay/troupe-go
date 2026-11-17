@@ -135,23 +135,26 @@ strict 立即完成）✅；只读快照隔离与禁写 ✅；improv 冲突显�
 events 环形有界 + pprof，管理写不经 HTTP ✅；examples/cart 与 examples/
 director CI 冒烟 ✅。证据见 [docs/verification.md](docs/verification.md) M4 节。
 
-## M5：可靠消息、目录与互操作（统一 ADR 后）
+## M5：可靠消息、目录与互操作（已完成，2026-11-17）
 
-- [ ] 持久流：`StreamStore` 契约 + Memory/PG Provider——事件日志 seq 全局单调
+- [x] 持久流：`StreamStore` 契约 + Memory/PG Provider——事件日志 seq 全局单调
       per-topic 保序、per-consumer 持久游标（ack 只前进，回退拒绝）、不 ack
       重放 at-least-once、retain_before 保留裁剪（慢消费者丢失为显式代价）、
       replay 显式；优先复用成熟消息系统的适配评估。
-- [ ] `VersionedDirectory`（per-entry version 单调 + view_version + 旧节点复活
+- [x] `VersionedDirectory`（per-entry version 单调 + view_version + 旧节点复活
       抢注册拒绝）、`Placer`（capabilities 子集匹配 + 负载最少者）、
       `Rebalancer`（死亡节点 handoff / 新节点 overflow 迁移，旧计划重放保护）。
-- [ ] 公共协议完整锚点：envelope golden 向量 + 帧协议契约测试
+- [x] 公共协议完整锚点：envelope golden 向量 + 帧协议契约测试
       （对齐 troupe.cr spec/golden_fixtures_spec.cr 全部四文件）；
       troupe-planning 采纳后向量迁入统一仓。
-- [ ] 与 troupe-planning golden fixtures/contract tests 对齐并接入跨语言
-      验证流程。
+- [x] 与 troupe-planning golden fixtures/contract tests 对齐并接入跨语言
+      验证流程（golden/ 为同源副本；CI 运行 identity/hash/errors 契约测试——
+      envelope 帧锚点在 transport 包）。
 
-**验收**：按 ADR 限定范围验证，不以共享 JSON 或 goroutine/channel 名称宣称
-多语言集群。
+**验收**（✅ 2026-11-17）：持久流反例（重放/回退拒绝/裁剪/不越过）
+Memory+PG 双 Provider ✅；目录版本保护与 handoff 重放保护 ✅；envelope 帧锚点
+（golden sample_request）✅；不以共享 JSON 或 goroutine/channel 名称宣称多语言
+集群 ✅。证据见 [docs/verification.md](docs/verification.md) M5 节。
 
 ## M6：高级模块与生态（已完成，2026-11-17）
 

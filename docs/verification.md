@@ -152,3 +152,21 @@
 - 实现注记：Rebuild 每次调用唯一 consumer（全量读取——固定 consumer 游标会被
   PollEach ack 推进，第二次重建读不到事件——实测发现修正）；ev.Data 为信封内层
   data（decodeEnvelope 已解出——测试解码层级曾写错，已修正）。
+
+## M5：可靠消息、目录与互操作（2026-11-17，A/B 两次迭代提交）
+
+- 结果：stream 5 用例 + placement 3 用例 + PG stream 1 用例 `-race` 全绿。验收对照（PLAN M5）：
+
+| 验收项 | 证据 |
+|---|---|
+| 持久流 at-least-once/回退拒绝/裁剪 | `TestStreamAppendPollAtLeastOnce`（独立游标）+ `TestStreamAckForwardOnly`（回退 ErrCursorBackward、同值拒绝）+ `TestStreamRetainBeforeExplicitLoss`（慢消费者丢失显式代价）+ `TestStreamReaderPollEachStopsOnFailure`（handler 失败不越过、游标不推进、重跑全量）+ `TestPGStreamAppendPollAckRetain`（真实 PG：seq 单调/游标持久/裁剪） |
+| VersionedDirectory 版本保护 | `TestVersionedDirectoryRegistration`（同节点 no-op/异节点+1/旧版本抢注册拒绝/view_version 变更计数） |
+| Placer 子集匹配+负载最少 | `TestPlacerCapabilitySubsetAndLeastLoaded`（均衡分布/gpu 子集不含 cpu/无能力显式拒绝/移除后拒绝） |
+| Rebalancer handoff+重放保护 | `TestRebalancerHandoffAndReplayProtection`（死亡节点全部条目改派后继/旧计划重放全 skipped no-op） |
+| envelope 帧锚点 | M3-B `TestFrameAgainstGoldenEnvelope`（golden/envelope.json sample_request 帧往返） |
+| 发布 | tag v0.1.0-alpha.1 已推；proxy.golang.org/@v/list 返回该版本、.info 返回 commit 7cf9a9e |
+
+- CI 注记：Windows runner 不支持 service containers——postgres service 自 M3-A 起
+  使 windows job 失败，M5 收尾时发现并拆分 linux（PG 全量）/windows（无 service）
+  双 job；修复后双平台绿（run 于 7cf9a9e）。M3-M5 的 windows 结论以修复后 CI 为准
+  （本地 windows go1.26 验证一直全绿，不影响交付内容）。
