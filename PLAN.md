@@ -8,7 +8,7 @@
 
 ## M0：设计与验证基线（已完成，2026-11-17）
 
-- [x] 建立公开仓库、MIT、go.mod（`github.com/ShiningRay/troupego`，go 1.23+）。
+- [x] 建立公开仓库、MIT、go.mod（`github.com/ShiningRay/troupe-go`，go 1.23+）。
 - [x] 编写目标架构、执行/持久化/集群契约（DESIGN.md）与 Orleans 差距
       （docs/orleans-gap.md）。
 - [x] `ActorID`/`ParseActorID`（troupe-identity/1）、`CanonicalHash`
@@ -18,7 +18,7 @@
 - [x] 明确没有 Actor 运行时，不声称单机或集群可用。
 
 **门禁**：干净 checkout 可执行 fmt/vet/test；CI 名称不把脚手架测试描述为
-Actor 验收。（✅ 本地 go1.26 windows 验证 `ok github.com/ShiningRay/troupego`）
+Actor 验收。（✅ 本地 go1.26 windows 验证 `ok github.com/ShiningRay/troupe-go`）
 
 ## M1：语义契约与最小单机核心（已完成，2026-11-17）
 
@@ -164,7 +164,7 @@ Memory+PG 双 Provider ✅；目录版本保护与 handoff 重放保护 ✅；en
       契约）；分布式事务独立评估（DESIGN 边界内不做）。
 - [x] Provider/故障/性能持续验证；公开不支持项与容量边界（verification.md
       + COMPATIBILITY 矩阵 + 基线基准）。
-- [x] 发布：tag 版本、Go module proxy 可拉取、pkg.go.dev 文档可用（2026-11-17 验证：tag v0.1.0-alpha.1 已推；proxy.golang.org @v/list 与 @v/.info 返回该版本；外部目录 go get+import+编译+运行全链路成功（默认 proxy+sumdb）；pkg.go.dev/github.com/ShiningRay/troupego@v0.1.0-alpha.1 返回 200 且含 troupe 包文档（NewStage/Stage/ActorID 可见）。）。
+- [x] 发布：tag 版本、Go module proxy 可拉取、pkg.go.dev 文档可用（2026-11-17 验证：tag v0.1.0-alpha.1 已推；proxy.golang.org @v/list 与 @v/.info 返回该版本；外部目录 go get+import+编译+运行全链路成功（默认 proxy+sumdb）；pkg.go.dev/github.com/ShiningRay/troupe-go@v0.1.0-alpha.1 返回 200 且含 troupe 包文档（NewStage/Stage/ActorID 可见）。）。
 
 ## 风险与对应
 

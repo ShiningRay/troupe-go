@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	troupe "github.com/ShiningRay/troupego"
+	troupe "github.com/ShiningRay/troupe-go"
 )
 
 // Envelope 请求/回复/取消/认证共用信封（troupe-envelope/1，golden/envelope.json）。

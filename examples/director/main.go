@@ -9,7 +9,7 @@ import (
 	"log"
 	"time"
 
-	troupe "github.com/ShiningRay/troupego"
+	troupe "github.com/ShiningRay/troupe-go"
 )
 
 type CounterProps struct {

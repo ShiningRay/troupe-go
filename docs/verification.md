@@ -147,7 +147,7 @@
 | 事件溯源一致性 | `TestEventSourcingRebuildConsistency`（Turn append 事件 → 独立重建者一致 175/3；快照+增量 == 全量 JSON 相等；apply 失败上抛） |
 | 版本兼容矩阵 | docs/COMPATIBILITY.md（跨语言承诺冻结级/API alpha 级/Provider 能力矩阵/不承诺项） |
 | 滚动升级指引 | docs/ROLLING_UPGRADE.md（存储先行/fencing 安全网/不兼容停机换/schemaVersion 逐级/已知边界） |
-| 发布 | tag v0.1.0-alpha.1（Go module：github.com/ShiningRay/troupego） |
+| 发布 | tag v0.1.0-alpha.1（Go module：github.com/ShiningRay/troupe-go） |
 
 - 实现注记：Rebuild 每次调用唯一 consumer（全量读取——固定 consumer 游标会被
   PollEach ack 推进，第二次重建读不到事件——实测发现修正）；ev.Data 为信封内层

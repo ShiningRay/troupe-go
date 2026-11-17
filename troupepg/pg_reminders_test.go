@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	troupe "github.com/ShiningRay/troupego"
+	troupe "github.com/ShiningRay/troupe-go"
 )
 
 func TestPGReminderOwnershipFilterAndFencing(t *testing.T) {

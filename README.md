@@ -1,7 +1,7 @@
 # Troupe.go
 
 面向 Go 的 Virtual Actor 框架，语义对标 Orleans 10.0，沿用 Troupe 的剧团术语；
-继承 [troupe.cr](https://github.com/ShiningRay/troupe.cr) 已验证的里程碑经验
+继承 [troupe.cr](https://github.com/ShiningRay/troupe-cr) 已验证的里程碑经验
 （strict 串行 / 三码分离 CAS+schemaVersion+epoch fencing / 有界拒绝 /
 UnknownOutcome / golden 向量对齐）。
 

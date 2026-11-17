@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	troupe "github.com/ShiningRay/troupego"
+	troupe "github.com/ShiningRay/troupe-go"
 )
 
 // TCPServer 包既有 Stage：白名单/串行/背压/超时/取消语义与本地一致

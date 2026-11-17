@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	troupe "github.com/ShiningRay/troupego"
+	troupe "github.com/ShiningRay/troupe-go"
 )
 
 func pgURL(t *testing.T) string {

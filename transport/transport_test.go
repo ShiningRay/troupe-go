@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	troupe "github.com/ShiningRay/troupego"
+	troupe "github.com/ShiningRay/troupe-go"
 )
 
 // ---- 帧协议与 golden 锚点 ----

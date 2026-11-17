@@ -1,4 +1,4 @@
-module github.com/ShiningRay/troupego
+module github.com/ShiningRay/troupe-go
 
 go 1.26.0
 

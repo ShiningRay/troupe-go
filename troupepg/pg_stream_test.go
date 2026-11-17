@@ -8,7 +8,7 @@ import (
 	"errors"
 	"testing"
 
-	troupe "github.com/ShiningRay/troupego"
+	troupe "github.com/ShiningRay/troupe-go"
 )
 
 func TestPGStreamAppendPollAckRetain(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 
-	troupe "github.com/ShiningRay/troupego"
+	troupe "github.com/ShiningRay/troupe-go"
 )
 
 type CartProps struct {
