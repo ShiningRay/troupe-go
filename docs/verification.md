@@ -166,6 +166,9 @@
 | envelope 帧锚点 | M3-B `TestFrameAgainstGoldenEnvelope`（golden/envelope.json sample_request 帧往返） |
 | 发布 | tag v0.1.0-alpha.1 已推；proxy.golang.org/@v/list 返回该版本、.info 返回 commit 7cf9a9e |
 
+- 成熟消息系统适配评估（PLAN M5 条目）：当前自研最小 StreamStore（对齐 troupe.cr
+  同路径）；topic/consumer/ack/retain 语义与 Kafka/Nats JetStream 的映射点已保留
+  （StreamStore 接口为适配边界），成熟系统 Provider 适配待有真实需求后评估。
 - CI 注记：Windows runner 不支持 service containers——postgres service 自 M3-A 起
   使 windows job 失败，M5 收尾时发现并拆分 linux（PG 全量）/windows（无 service）
   双 job；修复后双平台绿（run 于 7cf9a9e）。M3-M5 的 windows 结论以修复后 CI 为准
