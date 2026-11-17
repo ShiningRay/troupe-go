@@ -5,14 +5,7 @@
 （strict 串行 / 三码分离 CAS+schemaVersion+epoch fencing / 有界拒绝 /
 UnknownOutcome / golden 向量对齐）。
 
-> **当前状态：M3 共享状态与生产容错。** 单机核心（M1）+ SQLite/幂等/取消/
-> metrics/trace/基准（M2）之上，新增 PostgreSQL Provider（跨节点接管，租期
-> 所有权 + 单语句 fencing）、TCP transport（troupe-envelope/1 帧协议、token
-> 认证轮换、cancel 信封、断连 UnknownOutcome）、Roster/HashRing/Router
-> （incarnation 协调、键漂移）、优雅 drain 三段式、持久 Reminder（claim 租期
-> fencing + 归属过滤）与 Outbox（同事务提交 + 至少一次派发）。84 用例
-> `-race` 全绿（含真实 PostgreSQL 多进程 kill -9 恢复）。交错调度（read_only/
-> improv）、Show realtime、持久流、目录放置尚未实现（M4/M5）。
+> **当前状态：M6 生态模块完成（全里程碑 M0-M6 交付）。** 单机核心（M1）、SQLite/幂等/取消/metrics/trace/基准（M2）、PostgreSQL 跨节点接管/TCP transport/集群路由/Reminder/Outbox（M3）、交错调度模式 + Show realtime + Director（M4）、持久流 + 版本化目录/放置/再平衡（M5）、OTel 导出适配器 + 事件溯源 + 版本兼容矩阵 + 滚动升级指引（M6）。全仓用例 `-race` 全绿（root 84 / transport 11 / PG 8）。公开边界见 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)：公共 API 仍为 alpha，跨节点语义以真实 PostgreSQL 多进程证据为准。
 
 ## 文档
 
@@ -112,9 +105,9 @@ raw, err := f.Await(ctx)
 
 ## 实施阶段
 
-按 [PLAN.md](PLAN.md)：M0（✅ 2026-11-17）→ M1 单机核心（✅ 2026-11-17）→
-M2 SQLite/硬化/观测（✅ 2026-11-17）→ M3 PostgreSQL/transport/集群
-（✅ 2026-11-17）→ M4 调度扩展/Show → M5 流/目录/协议 → M6 生态/发布。
+按 [PLAN.md](PLAN.md)：M0–M6 全部交付（✅ 2026-11-17 当轮完成）：M0 golden 锚定 →
+M1 单机核心 → M2 SQLite/硬化/观测 → M3 PostgreSQL/transport/集群 →
+M4 调度扩展/Show → M5 流/目录/协议 → M6 生态/发布（tag v0.1.0-alpha.1）。
 
 ## 许可
 

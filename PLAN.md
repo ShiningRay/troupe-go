@@ -153,15 +153,15 @@ director CI 冒烟 ✅。证据见 [docs/verification.md](docs/verification.md) 
 **验收**：按 ADR 限定范围验证，不以共享 JSON 或 goroutine/channel 名称宣称
 多语言集群。
 
-## M6：高级模块与生态
+## M6：高级模块与生态（已完成，2026-11-17）
 
-- [ ] OTel 导出适配器（OTLP JSON v1，零外部依赖，sink 回调即 collector
+- [x] OTel 导出适配器（OTLP JSON v1，零外部依赖，sink 回调即 collector
       推送点）、版本兼容矩阵、滚动升级/回滚指引。
-- [ ] 持久 Outbox 完善、事件溯源扩展点（rebuild 顺序折叠/快照+增量==全量
+- [x] 持久 Outbox 完善、事件溯源扩展点（rebuild 顺序折叠/快照+增量==全量
       契约）；分布式事务独立评估（DESIGN 边界内不做）。
-- [ ] Provider/故障/性能持续验证；公开不支持项与容量边界（verification.md
+- [x] Provider/故障/性能持续验证；公开不支持项与容量边界（verification.md
       + COMPATIBILITY 矩阵 + 基线基准）。
-- [ ] 发布：tag 版本、Go module proxy 可拉取、pkg.go.dev 文档可用。
+- [ ] 发布：tag 版本、Go module proxy 可拉取、pkg.go.dev 文档可用（本轮打 tag v0.1.0-alpha.1；proxy/pkg.go.dev 拉取验证待公网确认）。
 
 ## 风险与对应
 

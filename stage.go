@@ -471,3 +471,16 @@ func (s *Stage) consumerExited(id ActorID) bool {
 	}
 	return slot.exitedClosed()
 }
+
+// eventHandlerSnapshot/traceHandlerSnapshot 快照（OTel Adapter Attach 链式恢复用）。
+func (s *Stage) eventHandlerSnapshot() func(StageEvent) {
+	s.handlerMu.RLock()
+	defer s.handlerMu.RUnlock()
+	return s.eventHandler
+}
+
+func (s *Stage) traceHandlerSnapshot() func(TraceEvent) {
+	s.handlerMu.RLock()
+	defer s.handlerMu.RUnlock()
+	return s.traceHandler
+}
