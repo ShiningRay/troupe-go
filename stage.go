@@ -74,6 +74,7 @@ type Stage struct {
 	slots      map[ActorID]*actorSlot
 	callSeq    uint64
 	closed     bool
+	draining   bool
 
 	metrics      *StageMetrics
 	eventHandler func(StageEvent)
@@ -229,6 +230,9 @@ func (s *Stage) prepareCall(id ActorID, method string, rawArgs json.RawMessage, 
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, nil, &CallRejectedError{Reason: RejectShutdown, Actor: id.Canonical(), Detail: "Stage " + s.name + " 已停机，拒收新 Call"}
+	}
+	if s.draining {
+		return nil, nil, &CallRejectedError{Reason: RejectDraining, Retryable: true, Actor: id.Canonical(), Detail: "Stage " + s.name + " 排空中，拒收新 Call（可漂移转发其他节点）"}
 	}
 	manifest, ok := s.repertoire[id.Role]
 	if !ok {
@@ -393,6 +397,45 @@ func (s *Stage) Closed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.closed
+}
+
+// BeginDrain 优雅 drain 第一阶段：拒收新 Call（CallRejectedError{draining,
+// retryable=true，可漂移转发其他节点}）；已入队/执行中的 Turn 照常完成
+// （执行占用语义不变）。
+func (s *Stage) BeginDrain() {
+	s.mu.Lock()
+	s.draining = true
+	s.mu.Unlock()
+}
+
+// Draining 返回是否处于排空中。
+func (s *Stage) Draining() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.draining
+}
+
+// Idle 所有 slot 均无排队且无执行中 Turn（drain 完成判定）。
+func (s *Stage) Idle() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, slot := range s.slots {
+		if !slot.idle() {
+			return false
+		}
+	}
+	return true
+}
+
+// FinishDrain 排空未完成（仍有排队/在途 Turn）→ InvalidActorStateError；
+// 完成则停机（等价 Close）。
+func (s *Stage) FinishDrain() error {
+	s.BeginDrain()
+	if !s.Idle() {
+		return &InvalidActorStateError{Detail: "Stage " + s.name + " 排空未完成（仍有排队/在途 Turn），拒绝 finish"}
+	}
+	s.Close()
+	return nil
 }
 
 // consumerExited 轮询辅助：指定 Actor 的消费者 goroutine 是否已退出
